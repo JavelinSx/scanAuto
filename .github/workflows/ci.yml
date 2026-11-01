@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # Gradle-проект собирается под Java 17 (android/app/build.gradle.kts).
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Версия — как в docs/architecture.md: test_api закреплён flutter_test этой версии.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.7
+          channel: stable
+          cache: true
+
+      - name: Зависимости
+        run: flutter pub get
+
+      - name: Форматирование
+        run: dart format --output=none --set-exit-if-changed packages/scan_core apps/mobile/lib apps/mobile/test
+
+      - name: Ядро — анализ и тесты
+        working-directory: packages/scan_core
+        run: |
+          dart analyze --fatal-infos
+          dart test
+
+      - name: Приложение — анализ и тесты
+        working-directory: apps/mobile
+        run: |
+          flutter analyze
+          flutter test
+
+      # Тесты не компилируют Kotlin: ошибку в MainActivity ловит только сборка.
+      - name: Сборка APK
+        working-directory: apps/mobile
+        run: flutter build apk --debug

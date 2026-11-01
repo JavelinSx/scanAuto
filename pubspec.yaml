@@ -1,0 +1,10 @@
+# Корень pub workspace: один pubspec.lock и одна .dart_tool на все пакеты.
+name: scanauto_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.13.5
+
+workspace:
+  - apps/mobile
+  - packages/scan_core
