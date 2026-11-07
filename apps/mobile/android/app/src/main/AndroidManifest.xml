@@ -1,9 +1,22 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Wi-Fi адаптеры ELM327 (TCP) и запросы к моделям ИИ. Bluetooth добавится на этапе 1. -->
+    <!-- Wi-Fi адаптеры ELM327 (TCP) и запросы к моделям ИИ. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Привязка сокетов к Wi-Fi адаптера, когда у его сети нет интернета (MainActivity). -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- Bluetooth Classic до ELM327 (BluetoothSpp). Android 12+: подключение к спаренным
+         устройствам; поиск не используется для геолокации. До 11 — старые разрешения. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <application
         android:label="scanAuto"
         android:name="${applicationName}"

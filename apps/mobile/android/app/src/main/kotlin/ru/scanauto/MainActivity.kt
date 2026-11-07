@@ -11,12 +11,14 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     private var wifiCallback: ConnectivityManager.NetworkCallback? = null
+    private var bluetooth: BluetoothSpp? = null
 
     private val connectivity: ConnectivityManager
         get() = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        bluetooth = BluetoothSpp(this, flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ru.scanauto/wifi")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -64,7 +66,18 @@ class MainActivity : FlutterActivity() {
         wifiCallback = null
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (bluetooth?.onPermissionResult(requestCode, grantResults) != true) {
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        }
+    }
+
     override fun onDestroy() {
+        bluetooth?.close()
         releaseWifi()
         super.onDestroy()
     }

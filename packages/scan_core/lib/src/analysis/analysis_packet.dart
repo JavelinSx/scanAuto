@@ -15,7 +15,9 @@ abstract final class AnalysisPacket {
   static const version = 1;
 
   /// [maxPoints] — точек на график после прореживания (LTTB сохраняет пики).
-  static Map<String, Object?> build(Recording rec, {int maxPoints = 60}) {
+  /// У записи по программе диагностики (с этапами) по умолчанию 90: она длиннее.
+  static Map<String, Object?> build(Recording rec, {int? maxPoints}) {
+    final points = maxPoints ?? (rec.segments.isEmpty ? 60 : 90);
     final idle = _idleClassifier(rec);
     final seriesOut = <Map<String, Object?>>[];
     for (final pid in standardPids) {
@@ -40,7 +42,7 @@ abstract final class AnalysisPacket {
         'unit': pid.unit,
         'stats': stats,
         'points': [
-          for (final (t, v) in lttb(s.tMs, s.values, maxPoints))
+          for (final (t, v) in lttb(s.tMs, s.values, points))
             [_round(t / 1000, 1), _round(v, digits)],
         ],
       });
@@ -48,7 +50,8 @@ abstract final class AnalysisPacket {
 
     return {
       'packet_version': version,
-      'vehicle': rec.vehicle?.title,
+      'vehicle': rec.vehicle?.forModel(),
+      'season': ?rec.season,
       'duration_s': rec.duration.inSeconds,
       'dtcs': [
         for (final code in rec.dtcs)
@@ -60,6 +63,8 @@ abstract final class AnalysisPacket {
       ],
       if (idle != null) 'conditions': _conditions(rec, idle),
       'derived': _derived(rec, idle),
+      if (rec.segments.isNotEmpty)
+        'stages': [for (final seg in rec.segments) stage(rec, seg)],
       'series': seriesOut,
     };
   }
@@ -113,8 +118,6 @@ abstract final class AnalysisPacket {
       };
     }
 
-    // Исправный узкополосный зонд до катализатора переключается через 0.45 В
-    // несколько раз в секунду в замкнутом контуре; ленивый — заметно реже.
     final o2 = rec.series['o2_b1s1'];
     if (o2 != null && o2.length > 1) {
       final rate = <String, Object?>{};
@@ -123,30 +126,127 @@ abstract final class AnalysisPacket {
         if (idle != null) ('idle', idle),
         if (idle != null) ('driving', (int t) => !idle(t)),
       ]) {
-        var crossings = 0;
-        var ms = 0;
-        for (var i = 1; i < o2.length; i++) {
-          if (!filter(o2.tMs[i])) continue;
-          ms += o2.tMs[i] - o2.tMs[i - 1];
-          if ((o2.values[i] - 0.45).sign != (o2.values[i - 1] - 0.45).sign) {
-            crossings++;
-          }
-        }
-        if (ms > 10000) rate[name] = _round(crossings / (ms / 60000), 1);
+        final r = _crossingsPerMin(o2, filter);
+        if (r != null) rate[name] = r;
       }
-      final intervals = [
-        for (var i = 1; i < o2.length; i++) o2.tMs[i] - o2.tMs[i - 1],
-      ]..sort();
-      final interval = intervals[intervals.length ~/ 2] / 1000;
       out['o2_b1s1'] = {
         'crossings_per_min': rate,
-        'sample_interval_s': _round(interval, 2),
-        // Между двумя замерами видно не больше одного пересечения, а быстрые
-        // переключения ещё и накладываются (алиасинг): это оценка снизу.
-        'max_detectable_per_min': _round(60 / interval, 0),
+        ..._o2Sampling(o2, (_) => true),
       };
     }
     return out;
+  }
+
+  /// Исправный узкополосный зонд до катализатора переключается через 0.45 В
+  /// несколько раз в секунду в замкнутом контуре; ленивый — заметно реже.
+  static num? _crossingsPerMin(Series o2, bool Function(int) filter) {
+    var crossings = 0;
+    var ms = 0;
+    for (var i = 1; i < o2.length; i++) {
+      if (!filter(o2.tMs[i]) || !filter(o2.tMs[i - 1])) continue;
+      ms += o2.tMs[i] - o2.tMs[i - 1];
+      if ((o2.values[i] - 0.45).sign != (o2.values[i - 1] - 0.45).sign) {
+        crossings++;
+      }
+    }
+    return ms > 10000 ? _round(crossings / (ms / 60000), 1) : null;
+  }
+
+  static Map<String, Object?> _o2Sampling(
+    Series o2,
+    bool Function(int) filter,
+  ) {
+    final intervals = [
+      for (var i = 1; i < o2.length; i++)
+        if (filter(o2.tMs[i]) && filter(o2.tMs[i - 1]))
+          o2.tMs[i] - o2.tMs[i - 1],
+    ]..sort();
+    if (intervals.isEmpty) return const {};
+    final interval = max(intervals[intervals.length ~/ 2], 1) / 1000;
+    return {
+      'sample_interval_s': _round(interval, 2),
+      // Между двумя замерами видно не больше одного пересечения, а быстрые
+      // переключения ещё и накладываются (алиасинг): это оценка снизу.
+      'max_detectable_per_min': _round(60 / interval, 0),
+    };
+  }
+
+  /// Этап программы: компактная статистика каждого параметра на отрезке.
+  /// Публичный — для журнала сеанса: итог каждого этапа пишется сразу.
+  /// и признаки, которые имеют смысл именно для этого этапа.
+  static Map<String, Object?> stage(Recording rec, RecordingSegment seg) {
+    final stats = <String, Object?>{};
+    for (final pid in standardPids) {
+      final s = rec.series[pid.key];
+      if (s == null || s.isEmpty) continue;
+      final from = s.lowerBound(seg.startMs);
+      final to = s.lowerBound(seg.endMs + 1);
+      if (to - from < 2) continue;
+      final full = _stats(s.values.sublist(from, to), pid.decimals + 1);
+      stats[pid.key] = {
+        for (final k in const ['min', 'median', 'p90', 'max', 'n']) k: full[k],
+      };
+    }
+
+    final derived = <String, Object?>{};
+    final coolant = rec.series['coolant'];
+    final rpm = rec.series['rpm'];
+    if (seg.key == 'warmup') {
+      if (coolant != null && coolant.isNotEmpty) {
+        final from = coolant.lowerBound(seg.startMs);
+        final to = coolant.lowerBound(seg.endMs + 1);
+        if (to > from) {
+          final reached = coolant.values
+              .sublist(from, to)
+              .indexWhere((v) => v >= 80);
+          derived['coolant_start'] = _round(coolant.values[from], 0);
+          derived['coolant_end'] = _round(coolant.values[to - 1], 0);
+          derived['reached_80c_after_s'] = reached < 0
+              ? null
+              : (coolant.tMs[from + reached] - seg.startMs) ~/ 1000;
+        }
+      }
+      // Холодный двигатель держит повышенные холостые, к концу прогрева они падают.
+      if (rpm != null && rpm.isNotEmpty) {
+        num? medianBetween(int a, int b) {
+          final from = rpm.lowerBound(a);
+          final to = rpm.lowerBound(b);
+          if (to - from < 2) return null;
+          return _stats(rpm.values.sublist(from, to), 0)['median'] as num;
+        }
+
+        derived['rpm_first_minute'] = medianBetween(
+          seg.startMs,
+          seg.startMs + 60000,
+        );
+        derived['rpm_last_minute'] = medianBetween(
+          seg.endMs - 60000,
+          seg.endMs + 1,
+        );
+      }
+    }
+    final o2 = rec.series['o2_b1s1'];
+    if (o2 != null && o2.length > 1) {
+      bool inSeg(int t) => seg.contains(t);
+      final r = _crossingsPerMin(o2, inSeg);
+      if (r != null) {
+        derived['o2_b1s1'] = {
+          'crossings_per_min': r,
+          ..._o2Sampling(o2, inSeg),
+        };
+      }
+    }
+
+    return {
+      'key': seg.key,
+      'title': seg.title,
+      'start_s': seg.startMs ~/ 1000,
+      'duration_s': (seg.endMs - seg.startMs) ~/ 1000,
+      'completed': seg.completed,
+      'note': ?seg.note,
+      'derived': derived,
+      'stats': stats,
+    };
   }
 
   static Map<String, Object?> _stats(List<double> values, int digits) {

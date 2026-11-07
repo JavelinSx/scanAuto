@@ -86,6 +86,20 @@ void main() {
     await elm.close();
   });
 
+  test('журнал обмена: команды, ответы, отключение', () async {
+    final lines = <String>[];
+    final elm = Elm327(SimulatedElm327(latency: Duration.zero), log: lines.add);
+    await elm.initialize();
+    expect(lines.first, 'TX ATZ');
+    expect(lines, contains('TX 0100'));
+    expect(
+      lines.any((l) => l.startsWith('RX ') && l.contains('ELM327')),
+      isTrue,
+    );
+    expect(lines.any((l) => l.contains('\r')), isFalse);
+    await elm.close();
+  });
+
   test('Wi-Fi: настоящий TCP-сокет до симулятора', () async {
     final server = await SimServer.start(scenario: SimScenario.vacuumLeak);
     final elm = Elm327(await TcpTransport.connect(server.host, server.port));

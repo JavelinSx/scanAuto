@@ -39,19 +39,19 @@
 | Навигация | go_router | 18.1.2 |
 | Графики | fl_chart | 1.3.0 |
 | HTTP к моделям | dio | 5.11.1 |
+| Bluetooth Classic (SPP) | свой модуль `BluetoothSpp.kt` | — | Без плагина: порядок попыток подключения клонов под контролем |
+| Журналы и записи | path_provider + share_plus | 2.1.6 / 13.3.1 |
+| Ключ ИИ, последний адаптер | flutter_secure_storage | 11.2.0 |
+| Экран не гаснет во время программы | wakelock_plus | 1.8.2 |
 | Тесты ядра | test | 1.31.1 — выше не даёт `flutter_test` (закрепляет test_api) |
 
 ### 3.2. Подключаются по этапам
 
 | Этап | Задача | Пакет | Версия | Комментарий |
 |---|---|---|---|---|
-| 1 | Bluetooth Classic (SPP) | flutter_blue_classic | 0.1.1 | Только Android, 160/160 на pub.dev, свежий. Ниже 1.0 — если подведёт на клонах, свой Kotlin-канал на `BluetoothSocket` (~150 строк). `flutter_bluetooth_serial` заброшен с 2021 |
 | 1 | BLE | flutter_blue_plus | 2.3.14 | Стандарт де-факто |
 | 1 | Разрешения | permission_handler | 13.0.2 | |
 | 2 | Хранение записей | drift + drift_flutter | 2.35.3 / 0.3.1 | Как в famApp |
-| 2 | Экран не гаснет во время записи | wakelock_plus | 1.8.2 | |
-| 2 | Экспорт | share_plus + path_provider | 13.3.1 / 2.1.6 | |
-| 3 | Ключ ИИ | flutter_secure_storage | 11.2.0 | Android Keystore |
 | 5 | MCP-сервер | dart_mcp или mcp_dart | 0.5.2 / 2.4.3 | Выбрать на этапе 5 |
 
 ## 4. Слои
@@ -79,8 +79,8 @@ VIN и коды, запускает `LiveSampler` и копит `Recording`. И�
 |---|---|
 | Сейчас | `INTERNET` — Wi-Fi адаптер (TCP) и запросы к моделям |
 | Сейчас | `ACCESS_NETWORK_STATE`, `CHANGE_NETWORK_STATE` — привязка сокетов к Wi-Fi адаптера (раздел 6) |
-| Этап 1, Android 12+ | `BLUETOOTH_CONNECT`, `BLUETOOTH_SCAN` с `neverForLocation` |
-| Этап 1, Android ≤ 11 | `BLUETOOTH`, `BLUETOOTH_ADMIN`, `ACCESS_FINE_LOCATION` (поиск устройств требует геолокацию) |
+| Сейчас, Android 12+ | `BLUETOOTH_CONNECT` (спрашивается при выборе адаптера), `BLUETOOTH_SCAN` с `neverForLocation` |
+| Сейчас, Android ≤ 11 | `BLUETOOTH`, `BLUETOOTH_ADMIN`. Геолокация не нужна: берём только спаренные устройства, без поиска |
 | Этап 2 | `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_CONNECTED_DEVICE` — запись с выключенным экраном |
 
 ## 6. Риски

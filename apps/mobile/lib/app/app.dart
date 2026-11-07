@@ -1,13 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import '../features/ai/ai_screen.dart';
 import '../features/connect/connect_screen.dart';
 import '../features/live/live_screen.dart';
+import '../features/logs/logs_screen.dart';
+import '../features/program/program_run_screen.dart';
+import '../features/program/program_setup_screen.dart';
 
 final _router = GoRouter(
   routes: [
     GoRoute(path: '/', builder: (context, state) => const ConnectScreen()),
     GoRoute(path: '/live', builder: (context, state) => const LiveScreen()),
+    GoRoute(
+      path: '/program',
+      builder: (context, state) => const ProgramSetupScreen(),
+    ),
+    GoRoute(
+      path: '/program/run',
+      builder: (context, state) => const ProgramRunScreen(),
+    ),
+    GoRoute(path: '/ai', builder: (context, state) => const AiScreen()),
+    GoRoute(path: '/logs', builder: (context, state) => const LogsScreen()),
   ],
 );
 

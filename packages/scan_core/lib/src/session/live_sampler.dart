@@ -14,16 +14,14 @@ final class Sample {
 /// топливо, напряжение) — по одному за круг: клон ELM327 по Bluetooth отвечает
 /// 10–20 раз в секунду, на всё сразу частоты не хватит.
 class LiveSampler {
-  LiveSampler(this._elm, List<Pid> pids, {DateTime Function()? now})
-    : fast = [
-        for (final p in pids)
-          if (fastKeys.contains(p.key)) p,
-      ],
-      slow = [
-        for (final p in pids)
-          if (!fastKeys.contains(p.key)) p,
-      ],
-      _now = now ?? DateTime.now;
+  LiveSampler(
+    this._elm,
+    this._pids, {
+    Set<String> focus = fastKeys,
+    DateTime Function()? now,
+  }) : _now = now ?? DateTime.now {
+    setFocus(focus);
+  }
 
   static const fastKeys = {
     'rpm',
@@ -42,9 +40,23 @@ class LiveSampler {
   static const maxTimeoutsInRow = 5;
 
   final Elm327 _elm;
-  final List<Pid> fast;
-  final List<Pid> slow;
+  final List<Pid> _pids;
+  List<Pid> fast = const [];
+  List<Pid> slow = const [];
   final DateTime Function() _now;
+
+  /// Сменить набор быстрых параметров — со следующего круга.
+  /// Программа диагностики меняет его по прогонам этапа.
+  void setFocus(Set<String> keys) {
+    fast = [
+      for (final p in _pids)
+        if (keys.contains(p.key)) p,
+    ];
+    slow = [
+      for (final p in _pids)
+        if (!keys.contains(p.key)) p,
+    ];
+  }
 
   /// Бесконечный поток значений; опрос останавливается отменой подписки.
   /// Ошибки отдельных запросов пропускаются, отключение адаптера — ошибка потока.

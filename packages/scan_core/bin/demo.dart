@@ -2,6 +2,7 @@
 //
 //   dart run scan_core:demo --scenario vacuumLeak            пакет для ИИ в stdout
 //   dart run scan_core:demo --scenario vacuumLeak --ask      отправить в модель
+//   dart run scan_core:demo --program winter --scenario thermostatStuckOpen   программа на Гранте
 //
 // Модель задаётся переменными окружения:
 //   AI_PROTOCOL  anthropic | openai (по умолчанию anthropic)
@@ -30,8 +31,25 @@ Future<void> main(List<String> args) async {
   );
   final minutes = int.tryParse(option('minutes') ?? '') ?? 5;
 
-  final rec = simulateRecording(scenario, duration: Duration(minutes: minutes))
-    ..vehicle = const VehicleInfo(title: 'Lada Vesta 1.6 16V, 2019, механика');
+  // --program summer|winter — вся программа «прогрев → город → трасса» на Гранте.
+  final season = Season.values.where((s) => s.name == option('program'));
+  final rec = season.isEmpty
+      ? (simulateRecording(scenario, duration: Duration(minutes: minutes))
+          ..vehicle = const VehicleInfo(
+            title: 'Lada Vesta 1.6 16V, 2019, механика',
+          ))
+      : simulateProgramRecording(
+          scenario,
+          DiagnosticProgram.standard(season.first),
+          vehicle: VehicleInfo(
+            make: 'Lada',
+            model: 'Granta',
+            engine: ladaGrantaEngines.first,
+            year: 2019,
+            mileageKm: 84000,
+            transmission: transmissions.first,
+          ),
+        );
   final packet = AnalysisPacket.build(rec);
   final user = diagnosisUserMessage(packet, question: option('question'));
 

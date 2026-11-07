@@ -19,6 +19,12 @@ OBD-II сканер для Android (Flutter) с разбором записан�
 - Симулятор Wi-Fi адаптера на ПК: `dart run scan_core:sim_server --scenario vacuumLeak`.
 - Формат проверяет CI: `dart format packages/scan_core apps/mobile/lib apps/mobile/test`.
 
+## Реальные прогоны
+
+Пользователь присылает журнал `scanauto-*.log` и запись `scanauto-*.json` (формат — `docs/release.md`).
+Читать журнал по тегам: `[elm]` — обмен с адаптером, `[stage]` — итоги этапов, `[snapshot]` — скорость опроса.
+Запись открывается `Recording.fromJson` и разбирается тем же промптом.
+
 ## Правила
 
 - Документы, комментарии и тексты интерфейса — по-русски. Комментарий объясняет «почему», а не «что».

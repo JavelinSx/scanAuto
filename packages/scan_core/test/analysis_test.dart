@@ -74,7 +74,7 @@ void main() {
     final packet = AnalysisPacket.build(rec, maxPoints: 40);
     final text = jsonEncode(packet);
     expect(text, isNot(contains(SimulatedElm327.vin)));
-    expect(packet['vehicle'], 'Lada Vesta');
+    expect((packet['vehicle']! as Map)['description'], 'Lada Vesta');
     expect((_series(packet, 'rpm')['points']! as List), hasLength(40));
     final conditions = packet['conditions']! as Map;
     expect(

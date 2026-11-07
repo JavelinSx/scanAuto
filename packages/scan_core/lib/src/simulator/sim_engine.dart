@@ -18,13 +18,28 @@ enum SimScenario {
 
 enum _Phase { idle, accel, cruise, decel }
 
+/// Как «едет» симулятор. Программа диагностики переключает режим по этапам.
+enum SimDrive {
+  /// Цикл 120 с: холостой ход, разгон до 60 км/ч, движение, торможение.
+  city,
+
+  /// Стоим на холостом ходу — этап прогрева.
+  idle,
+
+  /// Ровно 90 км/ч.
+  highway,
+}
+
 /// «Двигатель» 1.6 л: значения параметров как функции времени от холодного пуска.
-/// Цикл 120 с: холостой ход, разгон до 60 км/ч, движение, торможение, снова ХХ.
+/// Режим движения — [drive], температура снаружи — [ambient]: зимой прогрев дольше.
 final class SimEngine {
-  SimEngine(this.scenario, {int seed = 1}) : _random = Random(seed);
+  SimEngine(this.scenario, {int seed = 1, this.ambient = 20})
+    : _random = Random(seed);
 
   final SimScenario scenario;
   final Random _random;
+  final double ambient;
+  SimDrive drive = SimDrive.city;
 
   /// Как у типичной машины: второго ряда и температуры масла нет.
   static const supportedPids = {
@@ -35,6 +50,14 @@ final class SimEngine {
   double _noise(double amplitude) => (_random.nextDouble() * 2 - 1) * amplitude;
 
   _Phase _phase(double t) {
+    switch (drive) {
+      case SimDrive.idle:
+        return _Phase.idle;
+      case SimDrive.highway:
+        return _Phase.cruise;
+      case SimDrive.city:
+        break;
+    }
     final c = t % 120;
     if (c < 30) return _Phase.idle;
     if (c < 45) return _Phase.accel;
@@ -48,16 +71,23 @@ final class SimEngine {
     return switch (_phase(t)) {
       _Phase.idle => 0,
       _Phase.accel => (c - 30) / 15 * 60,
-      _Phase.cruise => 60 + 3 * sin(c / 4),
+      _Phase.cruise => (drive == SimDrive.highway ? 90 : 60) + 3 * sin(c / 4),
       _Phase.decel => 60 * (100 - c) / 10,
     };
   }
 
-  double coolant(double t) => switch (scenario) {
-    SimScenario.thermostatStuckOpen =>
-      72 - 52 * exp(-t / 200) - (_phase(t) == _Phase.cruise ? 4 : 0),
-    _ => min(90 - 70 * exp(-t / 150), 91),
-  };
+  /// Холодный пуск: двигатель остыл до [ambient]. В мороз греется медленнее.
+  double coolant(double t) {
+    final start = min(ambient, 40.0);
+    final slow = max(0, 10 - ambient) * 6;
+    return switch (scenario) {
+      SimScenario.thermostatStuckOpen =>
+        72 -
+            (72 - start) * exp(-t / (200 + slow)) -
+            (_phase(t) == _Phase.cruise ? 4 : 0),
+      _ => min(90 - (90 - start) * exp(-t / (150 + slow)), 91),
+    };
+  }
 
   double rpm(double t) {
     final c = t % 120;
@@ -146,7 +176,7 @@ final class SimEngine {
     0x0C => rpm(t) + _noise(10),
     0x0D => speed(t),
     0x0E => timing(t),
-    0x0F => 18 + (_phase(t) == _Phase.idle ? 6 : 0),
+    0x0F => ambient - 2 + (_phase(t) == _Phase.idle ? 6 : 0),
     0x10 => maf(t),
     0x11 => throttle(t),
     0x14 => o2Upstream(t),
@@ -155,7 +185,7 @@ final class SimEngine {
     0x2F => 62 - t / 600,
     0x33 => 99,
     0x42 => 14.1 + _noise(0.05),
-    0x46 => 12,
+    0x46 => ambient,
     _ => null,
   };
 

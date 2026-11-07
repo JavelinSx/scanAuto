@@ -36,7 +36,16 @@ class _LiveScreenState extends ConsumerState<LiveScreen> {
       body: switch (scan.phase) {
         ScanPhase.connecting ||
         ScanPhase.disconnected => _Connecting(scan.status),
-        ScanPhase.failed => _Failed(scan.error ?? '', onBack: _disconnect),
+        ScanPhase.failed => _Failed(
+          scan.error ?? '',
+          onBack: _disconnect,
+          onRetry: () =>
+              ref.read(scanControllerProvider.notifier).reconnect().ignore(),
+        ),
+        ScanPhase.finished => _Failed(
+          'Запись остановлена.',
+          onBack: _disconnect,
+        ),
         ScanPhase.live => _Live(
           scan: scan,
           selected: _selected,
@@ -68,10 +77,11 @@ class _Connecting extends StatelessWidget {
 }
 
 class _Failed extends StatelessWidget {
-  const _Failed(this.error, {required this.onBack});
+  const _Failed(this.error, {required this.onBack, this.onRetry});
 
   final String error;
   final VoidCallback onBack;
+  final VoidCallback? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -89,7 +99,13 @@ class _Failed extends StatelessWidget {
             const SizedBox(height: 16),
             Text(error, textAlign: TextAlign.center),
             const SizedBox(height: 16),
-            FilledButton(onPressed: onBack, child: const Text('Назад')),
+            if (onRetry case final retry?)
+              FilledButton(
+                onPressed: retry,
+                child: const Text('Переподключить'),
+              ),
+            const SizedBox(height: 8),
+            OutlinedButton(onPressed: onBack, child: const Text('Назад')),
           ],
         ),
       ),

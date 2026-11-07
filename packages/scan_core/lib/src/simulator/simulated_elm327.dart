@@ -15,8 +15,9 @@ final class SimulatedElm327 implements ObdTransport {
     Duration Function()? clock,
     this.latency = const Duration(milliseconds: 25),
     int seed = 1,
+    double ambient = 20,
   }) : _clock = clock ?? _stopwatchClock(),
-       _engine = SimEngine(scenario, seed: seed),
+       _engine = SimEngine(scenario, seed: seed, ambient: ambient),
        _dtcs = [...scenario.dtcs];
 
   static const vin = 'XTA21900000000001';
@@ -31,6 +32,10 @@ final class SimulatedElm327 implements ObdTransport {
   bool _echo = true;
   bool _spaces = true;
   bool _protocolFound = false;
+
+  /// Режим движения «машины»: программа диагностики меняет его по этапам.
+  SimDrive get drive => _engine.drive;
+  set drive(SimDrive value) => _engine.drive = value;
 
   static Duration Function() _stopwatchClock() {
     final watch = Stopwatch()..start();

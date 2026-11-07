@@ -50,11 +50,14 @@ final _voltagePattern = RegExp(r'(\d+(?:\.\d+)?)\s*V', caseSensitive: false);
 /// Команды идут строго по одной: байт, пришедший адаптеру во время ответа,
 /// прерывает его (STOPPED). Ответ — весь текст до приглашения «>».
 class Elm327 {
-  Elm327(this._transport) {
+  /// [log] получает каждую строку обмена: «TX 010C», «RX 41 0C 1A F8⏎⏎»,
+  /// тайм-ауты и отброшенные ответы — для журнала реальных прогонов.
+  Elm327(this._transport, {this.log}) {
     _subscription = _transport.input.listen(
       _onData,
       onError: _failPending,
       onDone: () {
+        log?.call('DISCONNECTED');
         _disconnected = true;
         _failPending(ElmDisconnectedException());
       },
@@ -62,6 +65,7 @@ class Elm327 {
   }
 
   final ObdTransport _transport;
+  final void Function(String line)? log;
   late final StreamSubscription<List<int>> _subscription;
   final _buffer = StringBuffer();
   Completer<String>? _pending;
@@ -91,10 +95,12 @@ class Elm327 {
     }
     _buffer.clear();
     final completer = _pending = Completer<String>();
+    log?.call('TX $command');
     await _transport.write(ascii.encode('$command\r'));
     try {
       return await completer.future.timeout(timeout);
     } on TimeoutException {
+      log?.call('TIMEOUT $command (${timeout.inMilliseconds} мс)');
       _needsResync = true;
       throw ElmTimeoutException(command);
     } finally {
@@ -109,7 +115,14 @@ class Elm327 {
         _buffer.clear();
         final pending = _pending;
         _pending = null;
-        if (pending != null && !pending.isCompleted) pending.complete(text);
+        final shown = text.replaceAll('\r', '⏎').replaceAll('\n', '');
+        if (pending != null && !pending.isCompleted) {
+          log?.call('RX $shown');
+          pending.complete(text);
+        } else {
+          // Опоздавший ответ на брошенную по тайм-ауту команду.
+          log?.call('DROP $shown');
+        }
       } else if (b != 0) {
         // Некоторые клоны шлют NUL перед приглашением.
         _buffer.writeCharCode(b);

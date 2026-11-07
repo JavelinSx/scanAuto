@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:scan_core/scan_core.dart';
 
+import '../../core/adapter_store.dart';
 import '../live/scan_controller.dart';
+import 'bluetooth_picker.dart';
 
 class ConnectScreen extends ConsumerStatefulWidget {
   const ConnectScreen({super.key});
@@ -30,11 +32,26 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     context.go('/live');
   }
 
+  Future<void> _pickBluetooth() async {
+    final target = await pickBluetoothAdapter(context, ref);
+    if (target != null && mounted) _connect(target);
+  }
+
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
+    final last = ref.watch(lastAdapterProvider).value;
     return Scaffold(
-      appBar: AppBar(title: const Text('scanAuto')),
+      appBar: AppBar(
+        title: const Text('scanAuto'),
+        actions: [
+          IconButton(
+            tooltip: 'Журналы сеансов',
+            icon: const Icon(Icons.description_outlined),
+            onPressed: () => context.go('/logs'),
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -46,6 +63,47 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
             style: text.bodyMedium,
           ),
           const SizedBox(height: 16),
+          Card(
+            color: Theme.of(context).colorScheme.primaryContainer,
+            margin: const EdgeInsets.only(bottom: 12),
+            child: ListTile(
+              contentPadding: const EdgeInsets.all(16),
+              leading: const Icon(Icons.route),
+              title: const Text('Диагностика по программе'),
+              subtitle: const Text(
+                'Прогрев → город → трасса, потом разбор записи ИИ',
+              ),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => context.go('/program'),
+            ),
+          ),
+          Text('Живые данные', style: text.titleMedium),
+          const SizedBox(height: 8),
+          if (last != null)
+            Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              child: ListTile(
+                contentPadding: const EdgeInsets.all(16),
+                leading: Icon(
+                  last is BluetoothTarget ? Icons.bluetooth : Icons.wifi,
+                ),
+                title: Text('Подключить ${last.title}'),
+                subtitle: const Text('Последний адаптер'),
+                trailing: const Icon(Icons.play_arrow),
+                onTap: () => _connect(last),
+              ),
+            ),
+          _TargetCard(
+            icon: Icons.bluetooth,
+            title: 'Bluetooth адаптер',
+            subtitle:
+                'Адаптер спаривается в настройках Bluetooth телефона, '
+                'здесь — выбор из спаренных.',
+            action: FilledButton(
+              onPressed: _pickBluetooth,
+              child: const Text('Выбрать адаптер'),
+            ),
+          ),
           _TargetCard(
             icon: Icons.science_outlined,
             title: 'Симулятор',
@@ -97,12 +155,6 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
               ],
             ),
           ),
-          const _TargetCard(
-            icon: Icons.bluetooth,
-            title: 'Bluetooth',
-            subtitle: 'Классический Bluetooth и BLE — следующий этап.',
-            enabled: false,
-          ),
         ],
       ),
     );
@@ -116,7 +168,6 @@ class _TargetCard extends StatelessWidget {
     required this.subtitle,
     this.child,
     this.action,
-    this.enabled = true,
   });
 
   final IconData icon;
@@ -124,32 +175,28 @@ class _TargetCard extends StatelessWidget {
   final String subtitle;
   final Widget? child;
   final Widget? action;
-  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
-    return Opacity(
-      opacity: enabled ? 1 : 0.5,
-      child: Card(
-        margin: const EdgeInsets.only(bottom: 12),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: Icon(icon),
-                title: Text(title),
-                subtitle: Text(subtitle),
-              ),
-              ?child,
-              if (action case final action?) ...[
-                const SizedBox(height: 12),
-                Align(alignment: Alignment.centerRight, child: action),
-              ],
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(icon),
+              title: Text(title),
+              subtitle: Text(subtitle),
+            ),
+            ?child,
+            if (action case final action?) ...[
+              const SizedBox(height: 12),
+              Align(alignment: Alignment.centerRight, child: action),
             ],
-          ),
+          ],
         ),
       ),
     );
