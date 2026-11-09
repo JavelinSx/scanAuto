@@ -293,10 +293,12 @@ class ScanController extends Notifier<ScanState> {
       final elm = _elm = Elm327(transport, log: (l) => _log.write('elm', l));
 
       status('Поиск протокола машины… до 15 секунд');
-      final info = await elm.initialize();
+      final info = await elm.initialize(onProgress: status);
       _log.write(
         'elm',
-        'адаптер ${info.version}, протокол ${info.protocol} (${info.protocolName}), '
+        'адаптер ${info.version}, протокол ${info.protocol} (${info.protocolName})'
+            '${info.attempt == null ? ', автопоиск' : ', найден перебором: ${info.attempt}'}'
+            ', напряжение ${info.voltage ?? '?'} В, '
             'PID: ${[for (final p in info.supportedPids) hexByte(p)].join(' ')}',
       );
       status('Чтение ошибок…');
@@ -582,8 +584,10 @@ class ScanController extends Notifier<ScanState> {
 
 String describeScanError(Object e) => switch (e) {
   ElmException(error: ElmError.unableToConnect) =>
-    'Машина не отвечает. Включите зажигание и проверьте, что адаптер '
-        'вставлен в разъём OBD до упора.',
+    'Адаптер на связи, но машина не ответила ни по одному протоколу. '
+        'Включите зажигание (ключ в положении ON или заведите двигатель) и '
+        'проверьте, что адаптер вставлен в разъём до упора. Если не поможет — '
+        'пришлите журнал сеанса.',
   ElmException(:final error) => 'Адаптер ответил ошибкой: ${error.name}.',
   ElmTimeoutException() =>
     'Адаптер перестал отвечать. Переподключите его к разъёму.',

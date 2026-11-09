@@ -13,6 +13,8 @@ final class ElmInfo {
     required this.version,
     required this.protocol,
     required this.supportedPids,
+    this.attempt,
+    this.voltage,
   });
 
   /// Как адаптер себя назвал: «ELM327 v1.5». У клонов не значит ничего.
@@ -22,9 +24,64 @@ final class ElmInfo {
   final int protocol;
   final Set<int> supportedPids;
 
+  /// Протокол найден не автопоиском, а перебором — какой попыткой.
+  final ProtocolAttempt? attempt;
+
+  /// Напряжение на разъёме при подключении (ATRV): с работающим двигателем
+  /// обычно 13.5–14.5 В, с выключенным — 12–12.8 В.
+  final double? voltage;
+
   bool get isCan => protocol >= 6;
   String get protocolName => obdProtocolNames[protocol] ?? 'протокол $protocol';
 }
+
+/// Явный протокол (ATSP) и, если нужно, заголовок (ATSH) — попытка после неудачного
+/// автопоиска.
+final class ProtocolAttempt {
+  const ProtocolAttempt(this.protocol, this.title, {this.header});
+
+  /// Цифра для ATSP: '5' — ISO 14230 с быстрой инициализацией.
+  final String protocol;
+  final String title;
+
+  /// Заголовок запроса без пробелов: '8110F1' — блоку двигателя по физическому адресу.
+  final String? header;
+
+  @override
+  String toString() =>
+      'ATSP$protocol${header == null ? '' : ' + ATSH$header'} ($title)';
+}
+
+/// Порядок перебора, если автопоиск (ATSP0) не нашёл протокол. Клоны v1.5 часто
+/// не находят K-Line сами. Блокам двигателя ВАЗ (Январь, Bosch M7.9.7, Itelma)
+/// на K-Line нужен запрос по физическому адресу: заголовок 81 10 F1 —
+/// стандартный функциональный C1 33 F1 они не всегда принимают.
+const protocolFallbacks = [
+  ProtocolAttempt('5', 'ISO 14230 KWP, быстрая инициализация'),
+  ProtocolAttempt(
+    '5',
+    'ISO 14230 KWP, быстрая инициализация, адрес двигателя ВАЗ',
+    header: '8110F1',
+  ),
+  ProtocolAttempt('4', 'ISO 14230 KWP, медленная инициализация'),
+  ProtocolAttempt(
+    '4',
+    'ISO 14230 KWP, медленная инициализация, адрес двигателя ВАЗ',
+    header: '8110F1',
+  ),
+  ProtocolAttempt('3', 'ISO 9141-2'),
+  ProtocolAttempt('6', 'CAN 11 бит, 500 кбит/с'),
+];
+
+/// Ошибки «машина не ответила по этому протоколу» — после них пробуем следующий.
+const _noAnswer = {
+  ElmError.unableToConnect,
+  ElmError.busInit,
+  ElmError.busError,
+  ElmError.canError,
+  ElmError.noData,
+  ElmError.stopped,
+};
 
 const obdProtocolNames = <int, String>{
   1: 'SAE J1850 PWM',
@@ -138,26 +195,36 @@ class Elm327 {
     }
   }
 
-  /// Сброс адаптера, настройка и поиск протокола. Бросает [ElmException]
-  /// с [ElmError.unableToConnect], если машина не отвечает (зажигание выключено).
-  Future<ElmInfo> initialize() async {
-    final reset = await send('ATZ', timeout: const Duration(seconds: 5));
-    await _expectOk('ATE0');
-    await _expectOk('ATL0');
-    // Пробелы, заголовки и адаптивные тайминги: разбор работает и без них,
-    // а часть клонов v1.5 эти команды не знает.
-    for (final c in const ['ATS0', 'ATH0', 'ATAT1']) {
-      await send(c);
-    }
+  /// Сброс адаптера, настройка и поиск протокола: сначала автопоиск, при неудаче —
+  /// перебор [protocolFallbacks]. [onProgress] — что показать пользователю.
+  /// Бросает [ElmException] с [ElmError.unableToConnect], если машина не ответила
+  /// ни по одному протоколу (зажигание выключено или адаптер не умеет её протокол).
+  Future<ElmInfo> initialize({void Function(String status)? onProgress}) async {
+    final reset = await _reset();
     await _expectOk('ATSP0');
     final version =
         _versionPattern.firstMatch(reset)?.group(0) ??
         (await send('ATI')).trim();
+    double? voltage;
+    try {
+      voltage = await readBatteryVoltage();
+    } on Object {
+      // Не все клоны знают ATRV — не повод отказываться от подключения.
+    }
 
     // Первый OBD-запрос запускает поиск протокола: на старых машинах до 10+ секунд.
+    ProtocolAttempt? attempt;
+    String raw;
+    try {
+      raw = await _firstRequest(const Duration(seconds: 15));
+    } on ElmException catch (e) {
+      if (!_noAnswer.contains(e.error)) rethrow;
+      log?.call('PROTOCOL автопоиск не нашёл протокол: ${e.error.name}');
+      (raw, attempt) = await _tryFallbacks(e, onProgress);
+    }
+
     final supported = <int>{};
     var base = 0x00;
-    var raw = await send('0100', timeout: const Duration(seconds: 15));
     while (true) {
       final command = '01${hexByte(base)}';
       final data = mode01Data(parseObdResponse(raw, command: command), base);
@@ -181,7 +248,58 @@ class Elm327 {
       version: version,
       protocol: protocol,
       supportedPids: supported,
+      attempt: attempt,
+      voltage: voltage,
     );
+  }
+
+  /// ATZ и настройка: после него сброшены протокол и заголовок.
+  Future<String> _reset() async {
+    final reset = await send('ATZ', timeout: const Duration(seconds: 5));
+    await _expectOk('ATE0');
+    await _expectOk('ATL0');
+    // Пробелы, заголовки и адаптивные тайминги: разбор работает и без них,
+    // а часть клонов v1.5 эти команды не знает.
+    for (final c in const ['ATS0', 'ATH0', 'ATAT1']) {
+      await send(c);
+    }
+    return reset;
+  }
+
+  /// 0100 с разбором: ошибка адаптера — исключение, иначе сырой ответ.
+  Future<String> _firstRequest(Duration timeout) async {
+    final raw = await send('0100', timeout: timeout);
+    parseObdResponse(raw, command: '0100');
+    return raw;
+  }
+
+  Future<(String, ProtocolAttempt)> _tryFallbacks(
+    ElmException first,
+    void Function(String status)? onProgress,
+  ) async {
+    var last = first;
+    for (final (i, a) in protocolFallbacks.indexed) {
+      onProgress?.call(
+        'Пробуем протокол ${i + 1} из ${protocolFallbacks.length}: ${a.title}',
+      );
+      log?.call('PROTOCOL попытка $a');
+      // С нуля: заголовок прошлой попытки не должен остаться.
+      await _reset();
+      await send('ATSP${a.protocol}');
+      if (a.header case final header?) await send('ATSH$header');
+      try {
+        final raw = await _firstRequest(const Duration(seconds: 10));
+        log?.call('PROTOCOL ответила: $a');
+        return (raw, a);
+      } on ElmException catch (e) {
+        if (!_noAnswer.contains(e.error)) rethrow;
+        log?.call('PROTOCOL нет ответа: ${e.error.name}');
+        last = e;
+      } on ElmTimeoutException {
+        log?.call('PROTOCOL нет ответа: тайм-аут');
+      }
+    }
+    throw ElmException(ElmError.unableToConnect, last.raw);
   }
 
   Future<void> _expectOk(String command) async {

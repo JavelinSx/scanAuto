@@ -16,11 +16,26 @@ final class SimulatedElm327 implements ObdTransport {
     this.latency = const Duration(milliseconds: 25),
     int seed = 1,
     double ambient = 20,
+    this.requiredProtocol,
+    this.requiredHeader,
   }) : _clock = clock ?? _stopwatchClock(),
        _engine = SimEngine(scenario, seed: seed, ambient: ambient),
        _dtcs = [...scenario.dtcs];
 
   static const vin = 'XTA21900000000001';
+
+  /// Машина отвечает только по этому протоколу, автопоиск её не находит —
+  /// как Гранта на K-Line с клоном v1.5. null — обычная машина на CAN.
+  final String? requiredProtocol;
+
+  /// И только на этот заголовок (ATSH), например '8110F1'.
+  final String? requiredHeader;
+
+  String _protocol = '0';
+  String? _header;
+
+  bool get _isCan =>
+      requiredProtocol == null || int.parse(requiredProtocol!, radix: 16) >= 6;
 
   final SimScenario scenario;
   final Duration latency;
@@ -73,7 +88,22 @@ final class SimulatedElm327 implements ObdTransport {
 
   String _handle(String c) {
     if (c.startsWith('AT')) return _at(c.substring(2));
-    final searching = _protocolFound ? '' : 'SEARCHING...\r';
+    final searching = _protocolFound || _protocol != '0'
+        ? ''
+        : 'SEARCHING...\r';
+    if (requiredProtocol case final required?) {
+      final answers =
+          _protocol == required &&
+          (requiredHeader == null || _header == requiredHeader);
+      if (!answers) {
+        // Как настоящий адаптер: автопоиск не нашёл, на K-Line — ошибка инициализации.
+        return _protocol == '0'
+            ? '${searching}UNABLE TO CONNECT'
+            : (_protocol == '4' || _protocol == '5' || _protocol == '3')
+            ? 'BUS INIT: ...ERROR'
+            : 'UNABLE TO CONNECT';
+      }
+    }
     _protocolFound = true;
     return searching + _obd(c);
   }
@@ -83,6 +113,8 @@ final class SimulatedElm327 implements ObdTransport {
       case 'Z':
         _echo = true;
         _spaces = true;
+        _protocol = '0';
+        _header = null;
         _protocolFound = false;
         return '\r\rELM327 v1.5';
       case 'I':
@@ -94,11 +126,21 @@ final class SimulatedElm327 implements ObdTransport {
         _spaces = c == 'S1';
         return 'OK';
       case 'DPN':
+        if (requiredProtocol case final p?) return _protocol == '0' ? 'A0' : p;
         return 'A6';
       case 'DP':
         return 'AUTO, ISO 15765-4 (CAN 11/500)';
       case 'RV':
         return '${(_engine.value(0x42, _seconds)! - 0.2).toStringAsFixed(1)}V';
+    }
+    if (RegExp(r'^SP([0-9A-C])$').firstMatch(c) case final m?) {
+      _protocol = m.group(1)!;
+      _protocolFound = false;
+      return 'OK';
+    }
+    if (RegExp(r'^SH([0-9A-F]{6})$').firstMatch(c) case final m?) {
+      _header = m.group(1);
+      return 'OK';
     }
     if (RegExp(r'^(L[01]|H[01]|AT[012]|SP[0-9A-C]|ST[0-9A-F]{2}|D)$')
         .hasMatch(c)) {
@@ -116,6 +158,16 @@ final class SimulatedElm327 implements ObdTransport {
       case 0x01 when bytes.length == 2:
         final data = _engine.mode01(bytes[1], _seconds);
         return data == null ? 'NO DATA' : _message([0x41, bytes[1], ...data]);
+      case 0x03 when !_isCan:
+        // Старые протоколы: без числа кодов, по три кода на кадр, добито нулями.
+        final codes = [for (final d in _dtcs) ...encodeDtc(d)];
+        while (codes.length < 6 || codes.length % 6 != 0) {
+          codes.add(0);
+        }
+        return [
+          for (var i = 0; i < codes.length; i += 6)
+            formatHex([0x43, ...codes.sublist(i, i + 6)], spaces: _spaces),
+        ].join('\r');
       case 0x03:
         return _message([
           0x43,
@@ -129,6 +181,18 @@ final class SimulatedElm327 implements ObdTransport {
       case 0x04:
         _dtcs.clear();
         return _message([0x44]);
+      case 0x09 when bytes.length == 2 && bytes[1] == 0x02 && !_isCan:
+        // Старые протоколы: пять кадров «49 02 N» по 4 байта, первый добит нулями.
+        final chars = [0, 0, 0, ...ascii.encode(vin)];
+        return [
+          for (var i = 0; i < 5; i++)
+            formatHex([
+              0x49,
+              0x02,
+              i + 1,
+              ...chars.sublist(i * 4, i * 4 + 4),
+            ], spaces: _spaces),
+        ].join('\r');
       case 0x09 when bytes.length == 2 && bytes[1] == 0x02:
         return _message([0x49, 0x02, 0x01, ...ascii.encode(vin)]);
       default:

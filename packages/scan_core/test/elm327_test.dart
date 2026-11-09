@@ -100,6 +100,63 @@ void main() {
     await elm.close();
   });
 
+  test(
+    'K-Line: автопоиск не находит, перебор находит протокол 5 с адресом ВАЗ',
+    () async {
+      final lines = <String>[];
+      final progress = <String>[];
+      final elm = Elm327(
+        SimulatedElm327(
+          scenario: SimScenario.vacuumLeak,
+          latency: Duration.zero,
+          requiredProtocol: '5',
+          requiredHeader: '8110F1',
+        ),
+        log: lines.add,
+      );
+      final info = await elm.initialize(onProgress: progress.add);
+      expect(info.protocol, 5);
+      expect(info.isCan, isFalse);
+      expect(info.attempt?.header, '8110F1');
+      expect(info.voltage, isNotNull);
+      expect(info.supportedPids, contains(0x0C));
+      expect(progress, hasLength(2));
+      expect(lines, contains(startsWith('PROTOCOL автопоиск не нашёл')));
+      expect(lines, contains(startsWith('PROTOCOL ответила')));
+      // На K-Line коды и VIN приходят в формате старых протоколов.
+      expect(await elm.readDtcs(), ['P0171']);
+      expect(await elm.readVin(), SimulatedElm327.vin);
+      expect(await elm.readPid(pidsByKey['coolant']!), isNotNull);
+      await elm.close();
+    },
+  );
+
+  test(
+    'машина молчит на всех протоколах — понятная ошибка после перебора',
+    () async {
+      final lines = <String>[];
+      final elm = Elm327(
+        SimulatedElm327(latency: Duration.zero, requiredProtocol: '1'),
+        log: lines.add,
+      );
+      await expectLater(
+        elm.initialize(),
+        throwsA(
+          isA<ElmException>().having(
+            (e) => e.error,
+            'error',
+            ElmError.unableToConnect,
+          ),
+        ),
+      );
+      expect(
+        lines.where((l) => l.startsWith('PROTOCOL попытка')),
+        hasLength(protocolFallbacks.length),
+      );
+      await elm.close();
+    },
+  );
+
   test('Wi-Fi: настоящий TCP-сокет до симулятора', () async {
     final server = await SimServer.start(scenario: SimScenario.vacuumLeak);
     final elm = Elm327(await TcpTransport.connect(server.host, server.port));
