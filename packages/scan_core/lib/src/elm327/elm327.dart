@@ -31,6 +31,11 @@ final class ElmInfo {
   /// обычно 13.5–14.5 В, с выключенным — 12–12.8 В.
   final double? voltage;
 
+  /// Что запомнить для следующего подключения ([Elm327.initialize] `preferred`).
+  String? get protocolKey =>
+      attempt?.key ??
+      (protocol > 0 ? protocol.toRadixString(16).toUpperCase() : null);
+
   bool get isCan => protocol >= 6;
   String get protocolName => obdProtocolNames[protocol] ?? 'протокол $protocol';
 }
@@ -47,6 +52,16 @@ final class ProtocolAttempt {
   /// Заголовок запроса без пробелов: '8110F1' — блоку двигателя по физическому адресу.
   final String? header;
 
+  /// Короткий ключ для хранения: '6', '5:8110F1'.
+  String get key => header == null ? protocol : '$protocol:$header';
+
+  /// Обратное к [key]; null — не похоже на ключ.
+  static ProtocolAttempt? fromKey(String key) {
+    final m = RegExp(r'^([1-9A-C])(?::([0-9A-F]{6}))?$').firstMatch(key);
+    if (m == null) return null;
+    return ProtocolAttempt(m.group(1)!, 'сохранённый', header: m.group(2));
+  }
+
   @override
   String toString() =>
       'ATSP$protocol${header == null ? '' : ' + ATSH$header'} ($title)';
@@ -57,6 +72,9 @@ final class ProtocolAttempt {
 /// на K-Line нужен запрос по физическому адресу: заголовок 81 10 F1 —
 /// стандартный функциональный C1 33 F1 они не всегда принимают.
 const protocolFallbacks = [
+  // CAN первым: на нём все машины примерно с 2008 года, в том числе Гранта после
+  // рестайлинга, и ответ «не тот протокол» приходит быстро.
+  ProtocolAttempt('6', 'CAN 11 бит, 500 кбит/с'),
   ProtocolAttempt('5', 'ISO 14230 KWP, быстрая инициализация'),
   ProtocolAttempt(
     '5',
@@ -70,7 +88,6 @@ const protocolFallbacks = [
     header: '8110F1',
   ),
   ProtocolAttempt('3', 'ISO 9141-2'),
-  ProtocolAttempt('6', 'CAN 11 бит, 500 кбит/с'),
 ];
 
 /// Ошибки «машина не ответила по этому протоколу» — после них пробуем следующий.
@@ -199,9 +216,15 @@ class Elm327 {
   /// перебор [protocolFallbacks]. [onProgress] — что показать пользователю.
   /// Бросает [ElmException] с [ElmError.unableToConnect], если машина не ответила
   /// ни по одному протоколу (зажигание выключено или адаптер не умеет её протокол).
-  Future<ElmInfo> initialize({void Function(String status)? onProgress}) async {
+  ///
+  /// [preferred] — протокол, на котором эта машина уже отвечала (ключ
+  /// [ProtocolAttempt.key]): пробуется первым, без автопоиска. Не ответила —
+  /// обычный порядок. Ключ найденного протокола — в [ElmInfo.protocolKey].
+  Future<ElmInfo> initialize({
+    void Function(String status)? onProgress,
+    String? preferred,
+  }) async {
     final reset = await _reset();
-    await _expectOk('ATSP0');
     final version =
         _versionPattern.firstMatch(reset)?.group(0) ??
         (await send('ATI')).trim();
@@ -212,6 +235,27 @@ class Elm327 {
       // Не все клоны знают ATRV — не повод отказываться от подключения.
     }
 
+    final saved = preferred == null ? null : ProtocolAttempt.fromKey(preferred);
+    if (saved != null) {
+      onProgress?.call('Подключение по сохранённому протоколу…');
+      log?.call('PROTOCOL сохранённый: $saved');
+      try {
+        await send('ATSP${saved.protocol}');
+        if (saved.header case final header?) await send('ATSH$header');
+        final raw = await _firstRequest(const Duration(seconds: 10));
+        log?.call('PROTOCOL ответила: $saved');
+        return await _finishInit(raw, version, voltage, saved);
+      } on ElmException catch (e) {
+        if (!_noAnswer.contains(e.error)) rethrow;
+        log?.call('PROTOCOL сохранённый не ответил: ${e.error.name}');
+      } on ElmTimeoutException {
+        log?.call('PROTOCOL сохранённый не ответил: тайм-аут');
+      }
+      await _reset();
+    }
+
+    await _expectOk('ATSP0');
+    onProgress?.call('Поиск протокола машины… до 15 секунд');
     // Первый OBD-запрос запускает поиск протокола: на старых машинах до 10+ секунд.
     ProtocolAttempt? attempt;
     String raw;
@@ -222,7 +266,17 @@ class Elm327 {
       log?.call('PROTOCOL автопоиск не нашёл протокол: ${e.error.name}');
       (raw, attempt) = await _tryFallbacks(e, onProgress);
     }
+    return _finishInit(raw, version, voltage, attempt);
+  }
 
+  /// Поддерживаемые PID и номер протокола после того, как машина ответила на 0100.
+  Future<ElmInfo> _finishInit(
+    String first,
+    String version,
+    double? voltage,
+    ProtocolAttempt? attempt,
+  ) async {
+    var raw = first;
     final supported = <int>{};
     var base = 0x00;
     while (true) {

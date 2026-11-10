@@ -11,7 +11,9 @@ import 'package:scanauto/features/live/scan_controller.dart';
 /// Адаптер «по Bluetooth»: симулятор, у которого можно оборвать связь.
 class _DroppableTransport implements ObdTransport {
   _DroppableTransport() {
-    _sim.input.listen(_input.add, onDone: drop);
+    _sim.input.listen((b) {
+      if (!_input.isClosed) _input.add(b);
+    }, onDone: drop);
   }
 
   final _sim = SimulatedElm327(
@@ -67,6 +69,16 @@ class _MemoryAdapters implements AdapterStore {
 
   @override
   Future<void> saveLast(AdapterTarget target) async => saved = target;
+
+  final protocols = <String, String>{};
+
+  @override
+  Future<String?> loadProtocol(AdapterTarget target) async =>
+      protocols[adapterId(target)];
+
+  @override
+  Future<void> saveProtocol(AdapterTarget target, String key) async =>
+      protocols[adapterId(target)!] = key;
 }
 
 class _MemoryLog implements SessionLog {
@@ -138,6 +150,10 @@ void main() {
         isTrue,
       );
 
+      // Протокол запомнен: следующее подключение — сразу на нём.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(adapters.protocols['bt.${adapter.address}'], '6');
+
       await controller.disconnect();
       expect(log.closed, isTrue);
       expect(
@@ -180,6 +196,16 @@ void main() {
     expect(bluetooth.connects, hasLength(2));
     expect(log.lines, contains('[session] переподключение'));
     expect(log.lines.any((l) => l.startsWith('[error] обрыв')), isTrue);
+    await controller.disconnect();
+  });
+
+  test('второе подключение идёт по сохранённому протоколу', () async {
+    adapters.protocols['bt.${adapter.address}'] = '6';
+    final controller = container.read(scanControllerProvider.notifier);
+    unawaited(controller.connect(adapter));
+    await _waitFor(container, (s) => s.phase == ScanPhase.live);
+    expect(log.lines, contains(startsWith('[elm] PROTOCOL сохранённый')));
+    expect(log.lines.any((l) => l.contains('[elm] TX ATSP0')), isFalse);
     await controller.disconnect();
   });
 }

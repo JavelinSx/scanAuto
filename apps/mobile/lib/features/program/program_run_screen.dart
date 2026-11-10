@@ -109,6 +109,7 @@ class _Running extends ConsumerWidget {
     }
     final stage = program.stages[status.stageIndex];
     final run = stage.runs[status.runIndex];
+    final last = status.stageIndex == program.stages.length - 1;
 
     String value(String key) {
       final pid = pidsByKey[key]!;
@@ -146,7 +147,27 @@ class _Running extends ConsumerWidget {
                 ),
             ],
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 8),
+          // Кнопки сразу под этапами: на держателе до них проще дотянуться.
+          Row(
+            children: [
+              Expanded(
+                child: FilledButton.tonal(
+                  onPressed: () =>
+                      ref.read(scanControllerProvider.notifier).skipStage(),
+                  child: Text(last ? 'Закончить' : 'Следующий этап'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: onStop,
+                  child: const Text('Остановить'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
           Text(stage.title, style: text.displaySmall),
           const SizedBox(height: 8),
           Text(stage.instruction, style: text.titleMedium),
@@ -183,25 +204,6 @@ class _Running extends ConsumerWidget {
               style: TextStyle(color: Theme.of(context).colorScheme.error),
             ),
           ],
-          const Spacer(),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () =>
-                      ref.read(scanControllerProvider.notifier).skipStage(),
-                  child: const Text('Закончить этап'),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: onStop,
-                  child: const Text('Остановить'),
-                ),
-              ),
-            ],
-          ),
         ],
       ),
     );

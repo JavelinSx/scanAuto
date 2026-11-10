@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:scan_core/scan_core.dart';
 
 import '../../core/adapter_store.dart';
+import '../../core/background_session.dart';
 import '../../core/bluetooth_classic.dart';
 import '../../core/session_log.dart';
 import '../../core/wifi_binding.dart';
@@ -169,6 +170,11 @@ class ScanController extends Notifier<ScanState> {
   late BluetoothClassic _bluetooth;
   late AdapterStore _adapters;
   late Future<SessionLog> Function() _openLog;
+  late BackgroundSession _background;
+
+  /// Время последнего замера по часам телефона: пауза больше 5 с — в журнал.
+  /// Так видно, что Android приостанавливал приложение или адаптер молчал.
+  DateTime? _lastSampleWall;
   bool _wifiBound = false;
 
   @override
@@ -177,6 +183,7 @@ class ScanController extends Notifier<ScanState> {
     _bluetooth = ref.read(bluetoothProvider);
     _adapters = ref.read(adapterStoreProvider);
     _openLog = ref.read(sessionLogFactoryProvider);
+    _background = ref.read(backgroundSessionProvider);
     ref.onDispose(() async {
       await _teardown();
       await _closeLog();
@@ -293,7 +300,15 @@ class ScanController extends Notifier<ScanState> {
       final elm = _elm = Elm327(transport, log: (l) => _log.write('elm', l));
 
       status('Поиск протокола машины… до 15 секунд');
-      final info = await elm.initialize(onProgress: status);
+      final preferred = await _adapters.loadProtocol(target);
+      final info = await elm.initialize(
+        onProgress: status,
+        preferred: preferred,
+      );
+      if (info.protocolKey case final key? when key != preferred) {
+        unawaited(_adapters.saveProtocol(target, key));
+        _log.write('session', 'протокол $key запомнен для ${target.title}');
+      }
       _log.write(
         'elm',
         'адаптер ${info.version}, протокол ${info.protocol} (${info.protocolName})'
@@ -358,7 +373,25 @@ class ScanController extends Notifier<ScanState> {
         now: now,
       );
       _sim?.drive = simDriveFor(runner?.stage.kind ?? StageKind.city);
+      _lastSampleWall = null;
+      unawaited(
+        _background.start(
+          runner == null
+              ? 'Идёт запись: ${target.title}'
+              : 'Программа: ${runner.stage.title}',
+        ),
+      );
       _samples = sampler.run().listen((s) {
+        final wall = DateTime.now();
+        final last = _lastSampleWall;
+        if (last != null && wall.difference(last).inSeconds >= 5) {
+          _log.write(
+            'gap',
+            'нет замеров ${wall.difference(last).inSeconds} с '
+                '(экран выключен без службы, приложение свёрнуто или адаптер молчал)',
+          );
+        }
+        _lastSampleWall = wall;
         recording.add(s.key, s.at, s.value);
         _latest[s.key] = s.value;
         _dirty = true;
@@ -378,6 +411,9 @@ class ScanController extends Notifier<ScanState> {
           _runIndex = status.runIndex;
           sampler.setFocus(stage.runs[_runIndex].fastKeys);
           _sim?.drive = simDriveFor(stage.kind);
+          if (status.stageChanged) {
+            unawaited(_background.start('Программа: ${stage.title}'));
+          }
           _log.write(
             'program',
             '${status.stageChanged ? 'этап «${stage.title}», ' : ''}'
@@ -527,6 +563,10 @@ class ScanController extends Notifier<ScanState> {
     }
   }
 
+  /// Сворачивание и разворачивание приложения — в журнал: по нему видно,
+  /// отчего в записи пауза.
+  void logLifecycle(String state) => _log.write('app', 'состояние $state');
+
   /// Для журнала: что ушло в модель и что вернулось (без ключа).
   void logAi(String message) => _log.write('ai', message);
 
@@ -575,6 +615,8 @@ class ScanController extends Notifier<ScanState> {
     final cancelled = samples?.cancel().catchError((Object _) {});
     await elm?.close();
     await cancelled;
+    // Не ждём: остановка службы не должна задерживать отключение.
+    unawaited(_background.stop());
     if (_wifiBound) {
       _wifiBound = false;
       await _wifi.release();

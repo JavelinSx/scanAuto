@@ -170,4 +170,24 @@ void main() {
     expect(copy.vehicle?.engine, _granta.engine);
     expect(copy.vehicle?.mileageKm, 84000);
   });
+
+  test('этапы независимы: только трасса, или город и трасса', () {
+    final highway = DiagnosticProgram.standard(
+      Season.summer,
+      only: {StageKind.highway},
+    );
+    expect(highway.stages.map((s) => s.kind), [StageKind.highway]);
+    final rec = simulateProgramRecording(SimScenario.healthy, highway);
+    expect(rec.segments.map((s) => s.key), ['highway']);
+    expect(rec.segments.single.completed, isTrue);
+
+    final cityHighway = DiagnosticProgram.standard(
+      Season.winter,
+      only: {StageKind.highway, StageKind.city},
+    );
+    expect(cityHighway.stages.map((s) => s.kind), [
+      StageKind.city,
+      StageKind.highway,
+    ]);
+  });
 }

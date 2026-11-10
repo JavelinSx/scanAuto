@@ -20,6 +20,8 @@ const _otherEngine = 'Другой — опишу в заметках';
 enum _Adapter { bluetooth, wifi, simulator }
 
 class _ProgramSetupScreenState extends ConsumerState<ProgramSetupScreen> {
+  /// Этапы независимы: можно пройти любые, например только трассу.
+  final _stages = {...StageKind.values};
   var _season = DateTime.now().month >= 4 && DateTime.now().month <= 10
       ? Season.summer
       : Season.winter;
@@ -86,7 +88,7 @@ class _ProgramSetupScreenState extends ConsumerState<ProgramSetupScreen> {
         .read(scanControllerProvider.notifier)
         .connect(
           target,
-          program: DiagnosticProgram.standard(_season),
+          program: DiagnosticProgram.standard(_season, only: _stages),
           vehicle: vehicle,
         )
         .ignore();
@@ -96,7 +98,7 @@ class _ProgramSetupScreenState extends ConsumerState<ProgramSetupScreen> {
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    final program = DiagnosticProgram.standard(_season);
+    final program = DiagnosticProgram.standard(_season, only: _stages);
     // Последний адаптер подставляется один раз, дальше выбор за пользователем.
     final last = ref.watch(lastAdapterProvider).value;
     if (!_lastApplied && last != null) {
@@ -132,7 +134,30 @@ class _ProgramSetupScreenState extends ConsumerState<ProgramSetupScreen> {
             onSelectionChanged: (s) => setState(() => _season = s.first),
           ),
           const SizedBox(height: 16),
-          Text('Программа', style: text.titleMedium),
+          Text('Этапы', style: text.titleMedium),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            children: [
+              for (final kind in StageKind.values)
+                FilterChip(
+                  label: Text(kind.title),
+                  selected: _stages.contains(kind),
+                  onSelected: (on) => setState(() {
+                    // Хотя бы один этап должен остаться.
+                    if (on) {
+                      _stages.add(kind);
+                    } else if (_stages.length > 1) {
+                      _stages.remove(kind);
+                    }
+                  }),
+                ),
+            ],
+          ),
+          Text(
+            'Двигатель уже тёплый — уберите прогрев. Каждый этап разбирается отдельно.',
+            style: text.bodySmall,
+          ),
           for (final (i, stage) in program.stages.indexed)
             ListTile(
               contentPadding: EdgeInsets.zero,

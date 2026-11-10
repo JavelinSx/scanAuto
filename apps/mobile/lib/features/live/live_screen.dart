@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:scan_core/scan_core.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'pid_chart.dart';
 import 'scan_controller.dart';
@@ -15,6 +18,19 @@ class LiveScreen extends ConsumerStatefulWidget {
 
 class _LiveScreenState extends ConsumerState<LiveScreen> {
   String _selected = 'rpm';
+
+  // Экран не гаснет, пока смотрим живые данные.
+  @override
+  void initState() {
+    super.initState();
+    unawaited(WakelockPlus.enable().catchError((Object _) {}));
+  }
+
+  @override
+  void dispose() {
+    unawaited(WakelockPlus.disable().catchError((Object _) {}));
+    super.dispose();
+  }
 
   void _disconnect() {
     ref.read(scanControllerProvider.notifier).disconnect().ignore();

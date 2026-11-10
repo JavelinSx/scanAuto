@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../features/ai/ai_screen.dart';
 import '../features/connect/connect_screen.dart';
 import '../features/live/live_screen.dart';
+import '../features/live/scan_controller.dart';
 import '../features/logs/logs_screen.dart';
 import '../features/program/program_run_screen.dart';
 import '../features/program/program_setup_screen.dart';
@@ -25,10 +27,34 @@ final _router = GoRouter(
   ],
 );
 
-class ScanAutoApp extends StatelessWidget {
+class ScanAutoApp extends ConsumerStatefulWidget {
   const ScanAutoApp({super.key});
 
+  @override
+  ConsumerState<ScanAutoApp> createState() => _ScanAutoAppState();
+}
+
+class _ScanAutoAppState extends ConsumerState<ScanAutoApp> {
   static const _seed = Color(0xFF1565C0);
+
+  // Сворачивание и выключение экрана — в журнал сеанса: так видно,
+  // откуда пауза в записи.
+  late final _lifecycle = AppLifecycleListener(
+    onStateChange: (s) =>
+        ref.read(scanControllerProvider.notifier).logLifecycle(s.name),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _lifecycle;
+  }
+
+  @override
+  void dispose() {
+    _lifecycle.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

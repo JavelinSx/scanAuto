@@ -120,7 +120,10 @@ void main() {
       expect(info.attempt?.header, '8110F1');
       expect(info.voltage, isNotNull);
       expect(info.supportedPids, contains(0x0C));
-      expect(progress, hasLength(2));
+      expect(
+        progress,
+        hasLength(4),
+      ); // автопоиск, CAN, K-Line, K-Line с адресом ВАЗ
       expect(lines, contains(startsWith('PROTOCOL автопоиск не нашёл')));
       expect(lines, contains(startsWith('PROTOCOL ответила')));
       // На K-Line коды и VIN приходят в формате старых протоколов.
@@ -156,6 +159,43 @@ void main() {
       await elm.close();
     },
   );
+
+  test('сохранённый протокол: сразу на нём, без автопоиска', () async {
+    final lines = <String>[];
+    final elm = Elm327(
+      SimulatedElm327(
+        latency: Duration.zero,
+        requiredProtocol: '5',
+        requiredHeader: '8110F1',
+      ),
+      log: lines.add,
+    );
+    final info = await elm.initialize(preferred: '5:8110F1');
+    expect(info.protocol, 5);
+    expect(info.protocolKey, '5:8110F1');
+    expect(lines.where((l) => l == 'TX 0100'), hasLength(1));
+    expect(lines.any((l) => l.contains('автопоиск')), isFalse);
+    await elm.close();
+  });
+
+  test('сохранённый протокол не ответил — обычный поиск', () async {
+    final lines = <String>[];
+    final elm = Elm327(
+      SimulatedElm327(latency: Duration.zero, requiredProtocol: '6'),
+      log: lines.add,
+    );
+    final info = await elm.initialize(preferred: '5:8110F1');
+    expect(info.protocol, 6);
+    expect(info.protocolKey, '6');
+    expect(lines, contains(startsWith('PROTOCOL сохранённый не ответил')));
+    await elm.close();
+  });
+
+  test('ключ протокола туда и обратно', () {
+    expect(ProtocolAttempt.fromKey('6')?.key, '6');
+    expect(ProtocolAttempt.fromKey('5:8110F1')?.header, '8110F1');
+    expect(ProtocolAttempt.fromKey('мусор'), isNull);
+  });
 
   test('Wi-Fi: настоящий TCP-сокет до симулятора', () async {
     final server = await SimServer.start(scenario: SimScenario.vacuumLeak);

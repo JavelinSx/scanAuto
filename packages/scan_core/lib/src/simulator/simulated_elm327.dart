@@ -126,7 +126,7 @@ final class SimulatedElm327 implements ObdTransport {
         _spaces = c == 'S1';
         return 'OK';
       case 'DPN':
-        if (requiredProtocol case final p?) return _protocol == '0' ? 'A0' : p;
+        if (requiredProtocol case final p?) return _protocol == '0' ? 'A$p' : p;
         return 'A6';
       case 'DP':
         return 'AUTO, ISO 15765-4 (CAN 11/500)';

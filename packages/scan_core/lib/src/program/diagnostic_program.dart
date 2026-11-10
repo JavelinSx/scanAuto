@@ -77,9 +77,11 @@ final class DiagnosticProgram {
   final Season season;
   final List<StageSpec> stages;
 
-  factory DiagnosticProgram.standard(Season season) {
+  /// Этапы независимы: [only] — какие проходить (порядок всегда прогрев → город →
+  /// трасса). Например, только трасса, если двигатель уже прогрет и город не нужен.
+  factory DiagnosticProgram.standard(Season season, {Set<StageKind>? only}) {
     final winter = season == Season.winter;
-    return DiagnosticProgram(season, [
+    final all = DiagnosticProgram(season, [
       StageSpec(
         kind: StageKind.warmup,
         instruction:
@@ -160,6 +162,11 @@ final class DiagnosticProgram {
           }),
         ],
       ),
+    ]);
+    if (only == null) return all;
+    return DiagnosticProgram(season, [
+      for (final s in all.stages)
+        if (only.contains(s.kind)) s,
     ]);
   }
 }

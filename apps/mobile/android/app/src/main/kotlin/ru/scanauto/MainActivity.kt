@@ -1,6 +1,10 @@
 package ru.scanauto
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -19,6 +23,28 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         bluetooth = BluetoothSpp(this, flutterEngine.dartExecutor.binaryMessenger)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ru.scanauto/service")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // Повторный start обновляет текст уведомления.
+                    "start" -> {
+                        askNotifications()
+                        val intent = Intent(this, RecordingService::class.java)
+                            .putExtra(RecordingService.EXTRA_TEXT, call.argument<String>("text"))
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                        result.success(null)
+                    }
+                    "stop" -> {
+                        stopService(Intent(this, RecordingService::class.java))
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "ru.scanauto/wifi")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -66,6 +92,16 @@ class MainActivity : FlutterActivity() {
         wifiCallback = null
     }
 
+    /** Android 13+: без разрешения служба работает, но уведомление не видно. */
+    private fun askNotifications() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATIONS_REQUEST)
+        }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -77,8 +113,13 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        stopService(Intent(this, RecordingService::class.java))
         bluetooth?.close()
         releaseWifi()
         super.onDestroy()
+    }
+
+    companion object {
+        private const val NOTIFICATIONS_REQUEST = 4102
     }
 }

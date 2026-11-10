@@ -10,13 +10,47 @@ import '../features/live/scan_controller.dart';
 abstract interface class AdapterStore {
   Future<AdapterTarget?> loadLast();
   Future<void> saveLast(AdapterTarget target);
+
+  /// Протокол, на котором машина отвечала через этот адаптер (ключ
+  /// `ProtocolAttempt.key`): со следующего раза подключение сразу на нём.
+  Future<String?> loadProtocol(AdapterTarget target);
+  Future<void> saveProtocol(AdapterTarget target, String key);
 }
+
+/// Для чего запоминать протокол: адрес Bluetooth или хост Wi-Fi. Симулятор — нет.
+String? adapterId(AdapterTarget target) => switch (target) {
+  BluetoothTarget(:final address) => 'bt.$address',
+  WifiTarget(:final host, :final port) => 'wifi.$host.$port',
+  SimulatorTarget() => null,
+};
 
 final class SecureAdapterStore implements AdapterStore {
   const SecureAdapterStore();
 
   static const _storage = FlutterSecureStorage();
   static const _key = 'adapter.last';
+
+  @override
+  Future<String?> loadProtocol(AdapterTarget target) async {
+    final id = adapterId(target);
+    if (id == null) return null;
+    try {
+      return await _storage.read(key: 'adapter.protocol.$id');
+    } on Object {
+      return null;
+    }
+  }
+
+  @override
+  Future<void> saveProtocol(AdapterTarget target, String key) async {
+    final id = adapterId(target);
+    if (id == null) return;
+    try {
+      await _storage.write(key: 'adapter.protocol.$id', value: key);
+    } on Object {
+      // Не запомнили — в следующий раз найдётся поиском.
+    }
+  }
 
   @override
   Future<AdapterTarget?> loadLast() async {
