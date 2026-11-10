@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import '../hex.dart';
 import '../obd/dtc.dart';
+import '../obd/mode06.dart';
 import '../obd/pids.dart';
 import '../transport/obd_transport.dart';
 import 'elm_response.dart';
@@ -422,6 +423,48 @@ class Elm327 {
     } on ElmException {
       return null;
     }
+  }
+
+  /// Счётчики пропусков воспламенения по цилиндрам (режим 06, только CAN).
+  /// null — блок не поддерживает тесты пропусков или протокол не CAN.
+  /// [tMs] — время чтения от начала записи.
+  Future<MisfireReport?> readMisfires({int cylinders = 4, int tMs = 0}) async {
+    if (!(_info?.isCan ?? true)) return null;
+    try {
+      final support = mode06Record(await send('06A0'), 'A0');
+      if (support == null || support.length < 6) return null;
+      final mids = decodeSupportedPids(0xA0, support.sublist(2));
+      if (!mids.contains(misfireCylinderMid(1))) return null;
+
+      Future<({int? current, int? ewma})?> read(int mid) async {
+        if (!mids.contains(mid)) return null;
+        final msg = mode06Record(await send('06${hexByte(mid)}'), hexByte(mid));
+        if (msg == null) return null;
+        final tests = parseMode06(msg).where((t) => t.mid == mid).toList();
+        return tests.isEmpty ? null : MisfireReport.countsFrom(tests);
+      }
+
+      final perCylinder = <int, ({int? current, int? ewma})>{};
+      for (var c = 1; c <= cylinders; c++) {
+        final counts = await read(misfireCylinderMid(c));
+        if (counts != null) perCylinder[c] = counts;
+      }
+      return MisfireReport(
+        tMs: tMs,
+        total: await read(misfireGeneralMid),
+        cylinders: perCylinder,
+      );
+    } on ElmException {
+      return null;
+    }
+  }
+
+  /// Первое сообщение ответа режима 06 на запрос с этим MID.
+  static List<int>? mode06Record(String raw, String mid) {
+    for (final m in parseObdResponse(raw, command: '06$mid')) {
+      if (m.length >= 2 && m[0] == 0x46) return m;
+    }
+    return null;
   }
 
   /// Напряжение на разъёме OBD, которое меряет сам адаптер (ATRV).

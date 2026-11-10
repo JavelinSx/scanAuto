@@ -1,3 +1,5 @@
+import '../obd/mode06.dart';
+
 /// Профиль машины. VIN хранится только на телефоне — в ИИ уходит [forModel].
 final class VehicleInfo {
   const VehicleInfo({
@@ -209,6 +211,9 @@ final class Recording {
   VehicleInfo? vehicle;
   final Map<String, Series> series = {};
 
+  /// Пропуски воспламенения по цилиндрам (режим 06): в начале и в конце сеанса.
+  final List<MisfireReport> misfires = [];
+
   /// Сырые ответы на запросы производителя, по команде. В пакет для ИИ не идут.
   final Map<String, RawSeries> raw = {};
 
@@ -275,6 +280,7 @@ final class Recording {
     'series': {
       for (final s in series.values) s.key: {'t': s.tMs, 'v': s.values},
     },
+    if (misfires.isNotEmpty) 'misfires': [for (final m in misfires) m.toJson()],
     if (raw.isNotEmpty)
       'raw': {
         for (final r in raw.values) r.command: {'t': r.tMs, 'hex': r.hex},
@@ -300,6 +306,10 @@ final class Recording {
     rec.segments.addAll([
       for (final s in (json['segments'] as List? ?? const []))
         RecordingSegment.fromJson((s as Map).cast<String, Object?>()),
+    ]);
+    rec.misfires.addAll([
+      for (final m in (json['misfires'] as List? ?? const []))
+        MisfireReport.fromJson((m as Map).cast<String, Object?>()),
     ]);
     for (final MapEntry(:key, :value)
         in ((json['raw'] as Map?) ?? const {})

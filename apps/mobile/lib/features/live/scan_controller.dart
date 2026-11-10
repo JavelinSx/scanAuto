@@ -354,6 +354,8 @@ class ScanController extends Notifier<ScanState> {
         _runner = program == null ? null : ProgramRunner(program, recording);
       }
       final runner = _runner;
+      // Пропуски по цилиндрам на старте — чтобы в конце было с чем сравнить.
+      if (!resume) await _readMisfires(elm, recording, 'начало');
       DateTime now() => recording.startedAt.add(_elapsed());
 
       state = ScanState(
@@ -526,6 +528,11 @@ class ScanController extends Notifier<ScanState> {
     if (!_isCurrent(generation) || state.phase != ScanPhase.live) return;
     // Отключаем адаптер сразу: после него (и снятия привязки к Wi-Fi)
     // у приложения снова есть интернет для запроса к модели.
+    // Пропуски за поездку — пока адаптер ещё подключён.
+    final elm = _elm;
+    final rec = _recording;
+    if (elm != null && rec != null) await _readMisfires(elm, rec, 'конец');
+    if (!_isCurrent(generation)) return;
     state = state.copyWith(phase: ScanPhase.finished);
     _logStages();
     _log.write('session', 'конец, этапы: ${_segmentsSummary()}');
@@ -603,6 +610,31 @@ class ScanController extends Notifier<ScanState> {
       } on Object {
         // Адаптер пропал — обычный опрос это покажет.
       }
+    }
+  }
+
+  /// Счётчики пропусков воспламенения (режим 06): в запись и журнал. Не поддерживает
+  /// блок или не ответил за 10 с — только строка в журнале, сеанс идёт дальше.
+  Future<void> _readMisfires(Elm327 elm, Recording rec, String when) async {
+    try {
+      final report = await elm
+          .readMisfires(tMs: _nowMs())
+          .timeout(const Duration(seconds: 10));
+      if (report == null) {
+        _log.write(
+          'misfire',
+          '$when: блок не отдаёт тесты пропусков (режим 06)',
+        );
+        return;
+      }
+      rec.misfires.add(report);
+      _log.write(
+        'misfire',
+        '$when: $report (за поездку / среднее за 10 поездок)'
+            '${report.total == null ? '' : ', всего ${report.total!.current ?? '—'}'}',
+      );
+    } on Object catch (e) {
+      _log.write('misfire', '$when: не прочитаны ($e)');
     }
   }
 

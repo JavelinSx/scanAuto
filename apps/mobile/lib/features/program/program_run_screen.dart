@@ -254,6 +254,16 @@ class _Summary extends ConsumerWidget {
             leading: Icon(Icons.warning_amber, color: scheme.error),
             title: Text('Ошибки: ${scan.dtcs.join(', ')}'),
           ),
+        if (rec?.misfires.lastOrNull case final misfires?)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.local_fire_department_outlined),
+            title: const Text('Пропуски воспламенения по цилиндрам'),
+            subtitle: Text(
+              '${misfires.toString().replaceAll('ц', 'цилиндр ')}\n'
+              'за поездку / среднее за 10 поездок',
+            ),
+          ),
         const SizedBox(height: 16),
         if (failed && controller.canResume) ...[
           FilledButton.icon(

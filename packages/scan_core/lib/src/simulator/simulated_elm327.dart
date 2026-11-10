@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import '../hex.dart';
 import '../obd/dtc.dart';
+import '../obd/pids.dart';
 import '../transport/obd_transport.dart';
 import 'sim_engine.dart';
 
@@ -18,6 +19,7 @@ final class SimulatedElm327 implements ObdTransport {
     double ambient = 20,
     this.requiredProtocol,
     this.requiredHeader,
+    this.misfires = const {},
   }) : _clock = clock ?? _stopwatchClock(),
        _engine = SimEngine(scenario, seed: seed, ambient: ambient),
        _dtcs = [...scenario.dtcs];
@@ -30,6 +32,10 @@ final class SimulatedElm327 implements ObdTransport {
 
   /// И только на этот заголовок (ATSH), например '8110F1'.
   final String? requiredHeader;
+
+  /// Пропуски по цилиндрам за текущую поездку для режима 06 (цилиндр → счёт).
+  /// Среднее за 10 поездок симулятор отдаёт как половину.
+  final Map<int, int> misfires;
 
   String _protocol = '0';
   String? _header;
@@ -192,6 +198,36 @@ final class SimulatedElm327 implements ObdTransport {
         ]);
       case 0x21 || 0x22 || 0x1A || 0x10:
         return _message([0x7F, bytes[0], 0x11]);
+      // Режим 06: тесты пропусков воспламенения (MID A1 — все, A2…A5 — цилиндры).
+      case 0x06 when bytes.length == 2 && _isCan:
+        final mid = bytes[1];
+        if (mid == 0xA0) {
+          return _message([
+            0x46,
+            0xA0,
+            ...encodeSupportedPids(0xA0, {0xA1, 0xA2, 0xA3, 0xA4, 0xA5}),
+          ]);
+        }
+        if (mid < 0xA1 || mid > 0xA5) return 'NO DATA';
+        final current = mid == 0xA1
+            ? misfires.values.fold(0, (a, b) => a + b)
+            : misfires[mid - 0xA1] ?? 0;
+        List<int> record(int tid, int value) => [
+          mid,
+          tid,
+          0x24,
+          value >> 8,
+          value & 0xFF,
+          0x00,
+          0x00,
+          0xFF,
+          0xFF,
+        ];
+        return _message([
+          0x46,
+          ...record(0x0B, current ~/ 2),
+          ...record(0x0C, current),
+        ]);
       case 0x09 when bytes.length == 2 && bytes[1] == 0x02 && !_isCan:
         // Старые протоколы: пять кадров «49 02 N» по 4 байта, первый добит нулями.
         final chars = [0, 0, 0, ...ascii.encode(vin)];

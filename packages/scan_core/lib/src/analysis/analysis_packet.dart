@@ -65,6 +65,15 @@ abstract final class AnalysisPacket {
       'derived': _derived(rec, idle),
       if (rec.segments.isNotEmpty)
         'stages': [for (final seg in rec.segments) stage(rec, seg)],
+      if (rec.misfires.isNotEmpty)
+        'misfires': {
+          'note':
+              'Режим 06: current — пропуски за текущую (или последнюю) поездку, '
+              'ewma — сглаженное среднее за 10 поездок; t — секунда записи.',
+          'reads': [
+            for (final m in rec.misfires) {...m.toJson(), 't': m.tMs ~/ 1000},
+          ],
+        },
       'series': seriesOut,
     };
   }

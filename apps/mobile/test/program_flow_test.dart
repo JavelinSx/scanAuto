@@ -160,6 +160,9 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
     expect(log.saved, same(rec));
+    // Пропуски по цилиндрам прочитаны в начале и в конце.
+    expect(rec.misfires, hasLength(2));
+    expect(log.lines, contains(startsWith('[misfire] конец: ц1 0/0')));
   }, timeout: const Timeout(Duration(seconds: 90)));
 
   testWidgets('разбор ИИ: ключ сохраняется, в модель уходят этапы и профиль', (
