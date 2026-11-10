@@ -1,5 +1,6 @@
 import '../elm327/elm327.dart';
 import '../elm327/elm_response.dart';
+import '../hex.dart';
 import '../obd/pids.dart';
 
 final class Sample {
@@ -19,6 +20,10 @@ class LiveSampler {
     this._pids, {
     Set<String> focus = fastKeys,
     DateTime Function()? now,
+    this.rawCommands = const [],
+    this.onRaw,
+    this.rawEveryRounds = 4,
+    this.rawHeader,
   }) : _now = now ?? DateTime.now {
     setFocus(focus);
   }
@@ -41,6 +46,16 @@ class LiveSampler {
 
   final Elm327 _elm;
   final List<Pid> _pids;
+
+  /// Запросы производителя (например, '2101'): раз в [rawEveryRounds] кругов,
+  /// ответ — сырой hex в [onRaw]. Расшифровки пока нет, поэтому реже PID.
+  final List<String> rawCommands;
+  final void Function(String command, DateTime at, String hex)? onRaw;
+  final int rawEveryRounds;
+
+  /// Заголовок для запросов производителя (на CAN — '7E0', двигатель); после них
+  /// возвращается функциональный 7DF, чтобы обычный опрос шёл как раньше.
+  final String? rawHeader;
   List<Pid> fast = const [];
   List<Pid> slow = const [];
   final DateTime Function() _now;
@@ -63,7 +78,28 @@ class LiveSampler {
   Stream<Sample> run() async* {
     var slowIndex = 0;
     var timeoutsInRow = 0;
+    var rounds = 0;
     while (true) {
+      if (onRaw != null &&
+          rawCommands.isNotEmpty &&
+          rounds++ % rawEveryRounds == 0) {
+        if (rawHeader case final h?) await _elm.send('ATSH$h');
+        for (final command in rawCommands) {
+          try {
+            final raw = await _elm.send(command);
+            final messages = parseObdResponse(raw, command: command);
+            if (messages.isNotEmpty) {
+              onRaw!(command, _now(), formatHex(messages.first, spaces: false));
+            }
+            timeoutsInRow = 0;
+          } on ElmTimeoutException {
+            if (++timeoutsInRow >= maxTimeoutsInRow) rethrow;
+          } on ElmException {
+            // Блок не ответил на этот раз — следующий круг.
+          }
+        }
+        if (rawHeader != null) await _elm.send('ATSH7DF');
+      }
       final round = [
         ...fast,
         if (slow.isNotEmpty) slow[slowIndex++ % slow.length],

@@ -147,6 +147,10 @@ class ScanController extends Notifier<ScanState> {
   Recording? _recording;
   ProgramRunner? _runner;
   int _runIndex = 0;
+
+  /// Блок данных производителя (`21 01`), найденный разведкой: его ответы пишутся
+  /// в запись сырыми, расшифровка — по журналам. null — блок не отвечает.
+  String? _dataBlock;
   int _loggedSegments = 0;
   int _lastSnapshotMs = 0;
   int _lastSnapshotSamples = 0;
@@ -207,6 +211,7 @@ class ScanController extends Notifier<ScanState> {
     _recording = null;
     _runner = null;
     _runIndex = 0;
+    _dataBlock = null;
     _loggedSegments = 0;
     _lastSnapshotMs = 0;
     _lastSnapshotSamples = 0;
@@ -325,6 +330,7 @@ class ScanController extends Notifier<ScanState> {
         'сохранённые: ${dtcs.join(', ')}; ожидающие: ${pending.join(', ')}'
             '${vin == null ? '; VIN не прочитан' : '; VIN прочитан'}',
       );
+      if (info.isCan && !resume) await _probeEcu(elm, status);
       if (!_isCurrent(generation)) return;
       unawaited(
         _adapters.saveLast(target).then((_) {
@@ -371,11 +377,14 @@ class ScanController extends Notifier<ScanState> {
         pids,
         focus: runner?.stage.runs[_runIndex].fastKeys ?? LiveSampler.fastKeys,
         now: now,
+        rawCommands: [?_dataBlock],
+        rawHeader: '7E0',
+        onRaw: recording.addRaw,
       );
       _sim?.drive = simDriveFor(runner?.stage.kind ?? StageKind.city);
       _lastSampleWall = null;
       unawaited(
-        _background.start(
+        _startBackground(
           runner == null
               ? 'Идёт запись: ${target.title}'
               : 'Программа: ${runner.stage.title}',
@@ -561,6 +570,50 @@ class ScanController extends Notifier<ScanState> {
     } on Object catch (e) {
       _log.write('error', 'запись не сохранилась: $e');
     }
+  }
+
+  /// Разведка блока двигателя: что он отвечает сверх стандартного OBD. Только
+  /// чтение. Не мешает сеансу: любая ошибка — в журнал, опрос идёт как обычно.
+  Future<void> _probeEcu(Elm327 elm, void Function(String) status) async {
+    status('Опрос блока двигателя…');
+    try {
+      final probe = EcuProbe(elm);
+      for (final r in await probe.run(isCan: true)) {
+        _log.write(
+          'vaz',
+          '${r.title}: ${r.command} → ${r.raw}'
+              '${r.positive == null
+                  ? ''
+                  : r.positive!
+                  ? ' [ответил]'
+                  : ' [отказ]'}',
+        );
+      }
+      _dataBlock = probe.dataBlockCommand;
+      _log.write(
+        'vaz',
+        _dataBlock == null
+            ? 'блок данных производителя не отвечает — пишем только стандартные PID'
+            : 'блок данных $_dataBlock пишется в запись сырым раз в несколько секунд',
+      );
+    } on Object catch (e) {
+      _log.write('vaz', 'разведка прервана: $e');
+      try {
+        await elm.send('ATSH7DF');
+      } on Object {
+        // Адаптер пропал — обычный опрос это покажет.
+      }
+    }
+  }
+
+  /// Запуск службы и её состояние — в журнал: по ним видно, почему приложение
+  /// могло замерзать в фоне (служба не запустилась, ограничение батареи, прошивка).
+  Future<void> _startBackground(String text) async {
+    final error = await _background.start(text);
+    if (error != null) _log.write('service', 'не запустилась: $error');
+    await Future<void>.delayed(const Duration(seconds: 2));
+    final status = await _background.status();
+    _log.write('service', status?.toString() ?? 'состояние недоступно');
   }
 
   /// Сворачивание и разворачивание приложения — в журнал: по нему видно,

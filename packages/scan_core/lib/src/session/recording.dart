@@ -187,6 +187,16 @@ final class Series {
   }
 }
 
+/// Сырые ответы на запрос производителя (например, `21 01` блока ВАЗ): что значат
+/// байты, ещё не известно — их сопоставляют с обычными PID по записям.
+final class RawSeries {
+  RawSeries(this.command);
+
+  final String command;
+  final List<int> tMs = [];
+  final List<String> hex = [];
+}
+
 /// Запись: временные ряды по PID и коды, прочитанные за сеанс.
 /// Формат JSON (format/version) — это и файл экспорта для MCP-сервера.
 final class Recording {
@@ -198,6 +208,16 @@ final class Recording {
   final DateTime startedAt;
   VehicleInfo? vehicle;
   final Map<String, Series> series = {};
+
+  /// Сырые ответы на запросы производителя, по команде. В пакет для ИИ не идут.
+  final Map<String, RawSeries> raw = {};
+
+  void addRaw(String command, DateTime at, String hex) {
+    final s = raw.putIfAbsent(command, () => RawSeries(command));
+    s.tMs.add(at.difference(startedAt).inMilliseconds);
+    s.hex.add(hex);
+  }
+
   List<String> dtcs = [];
   List<String> pendingDtcs = [];
 
@@ -255,6 +275,10 @@ final class Recording {
     'series': {
       for (final s in series.values) s.key: {'t': s.tMs, 'v': s.values},
     },
+    if (raw.isNotEmpty)
+      'raw': {
+        for (final r in raw.values) r.command: {'t': r.tMs, 'hex': r.hex},
+      },
   };
 
   factory Recording.fromJson(Map<String, Object?> json) {
@@ -277,6 +301,15 @@ final class Recording {
       for (final s in (json['segments'] as List? ?? const []))
         RecordingSegment.fromJson((s as Map).cast<String, Object?>()),
     ]);
+    for (final MapEntry(:key, :value)
+        in ((json['raw'] as Map?) ?? const {})
+            .cast<String, Object?>()
+            .entries) {
+      final m = (value! as Map).cast<String, Object?>();
+      final r = rec.raw[key] = RawSeries(key);
+      r.tMs.addAll((m['t']! as List).cast<num>().map((e) => e.toInt()));
+      r.hex.addAll((m['hex']! as List).cast<String>());
+    }
     final series = (json['series']! as Map).cast<String, Object?>();
     for (final MapEntry(:key, :value) in series.entries) {
       final m = (value! as Map).cast<String, Object?>();

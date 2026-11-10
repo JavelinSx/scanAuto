@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:scan_core/scan_core.dart';
 
 import '../../core/adapter_store.dart';
+import '../connect/background_card.dart';
 import '../connect/bluetooth_picker.dart';
 import '../live/scan_controller.dart';
 
@@ -315,6 +316,7 @@ class _ProgramSetupScreenState extends ConsumerState<ProgramSetupScreen> {
               ],
             ),
           const SizedBox(height: 24),
+          const BackgroundCard(),
           FilledButton(onPressed: _start, child: const Text('Начать')),
           const SizedBox(height: 8),
           Text(

@@ -25,15 +25,25 @@ class RecordingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "Идёт запись"
-        val notification = buildNotification(text)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            val notification = buildNotification(text)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            running = true
+            lastError = null
+        } catch (e: Exception) {
+            // Причину — в журнал сеанса через status(); без службы сеанс всё равно идёт.
+            lastError = "${e.javaClass.simpleName}: ${e.message}"
+            running = false
+            stopSelf()
+            return START_NOT_STICKY
         }
         if (wakeLock == null) {
             val power = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -81,6 +91,7 @@ class RecordingService : Service() {
     }
 
     override fun onDestroy() {
+        running = false
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         super.onDestroy()
@@ -90,5 +101,9 @@ class RecordingService : Service() {
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
         const val EXTRA_TEXT = "text"
+
+        /** Для status(): работает ли служба и почему не запустилась. */
+        @Volatile var running = false
+        @Volatile var lastError: String? = null
     }
 }

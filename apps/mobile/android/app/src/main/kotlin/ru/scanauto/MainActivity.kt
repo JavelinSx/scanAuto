@@ -3,8 +3,12 @@ package ru.scanauto
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.app.NotificationManager
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -31,11 +35,29 @@ class MainActivity : FlutterActivity() {
                         askNotifications()
                         val intent = Intent(this, RecordingService::class.java)
                             .putExtra(RecordingService.EXTRA_TEXT, call.argument<String>("text"))
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            startForegroundService(intent)
-                        } else {
-                            startService(intent)
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                            result.success(null)
+                        } catch (e: Exception) {
+                            RecordingService.lastError = "${e.javaClass.simpleName}: ${e.message}"
+                            result.error("start_failed", RecordingService.lastError, null)
                         }
+                    }
+                    "status" -> result.success(serviceStatus())
+                    "requestBatteryExemption" -> {
+                        result.success(requestBatteryExemption())
+                    }
+                    "openAppSettings" -> {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:$packageName"),
+                            ),
+                        )
                         result.success(null)
                     }
                     "stop" -> {
@@ -90,6 +112,44 @@ class MainActivity : FlutterActivity() {
         connectivity.bindProcessToNetwork(null)
         wifiCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
         wifiCallback = null
+    }
+
+    /** Всё, что нужно, чтобы понять по журналу, почему приложение замерзало в фоне. */
+    private fun serviceStatus(): Map<String, Any?> {
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val notifications = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        return mapOf(
+            "running" to RecordingService.running,
+            "error" to RecordingService.lastError,
+            "notifications" to notifications.areNotificationsEnabled(),
+            "batteryExempt" to power.isIgnoringBatteryOptimizations(packageName),
+            "manufacturer" to Build.MANUFACTURER,
+            "model" to Build.MODEL,
+            "sdk" to Build.VERSION.SDK_INT,
+            "release" to Build.VERSION.RELEASE,
+        )
+    }
+
+    /**
+     * Системный запрос «не ограничивать работу в фоне». Без него прошивки Xiaomi,
+     * Honor, Samsung и других замораживают приложение даже со службой.
+     */
+    private fun requestBatteryExemption(): Boolean {
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (power.isIgnoringBatteryOptimizations(packageName)) return true
+        return try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName"),
+                ),
+            )
+            false
+        } catch (e: Exception) {
+            // Нет такого экрана в прошивке — открываем общий список.
+            startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            false
+        }
     }
 
     /** Android 13+: без разрешения служба работает, но уведомление не видно. */

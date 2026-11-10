@@ -5,6 +5,7 @@ import 'package:scan_core/scan_core.dart';
 
 import '../../core/adapter_store.dart';
 import '../live/scan_controller.dart';
+import 'background_card.dart';
 import 'bluetooth_picker.dart';
 
 class ConnectScreen extends ConsumerStatefulWidget {
@@ -63,6 +64,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
             style: text.bodyMedium,
           ),
           const SizedBox(height: 16),
+          const BackgroundCard(),
           Card(
             color: Theme.of(context).colorScheme.primaryContainer,
             margin: const EdgeInsets.only(bottom: 12),

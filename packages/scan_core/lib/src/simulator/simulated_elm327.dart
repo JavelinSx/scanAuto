@@ -138,7 +138,7 @@ final class SimulatedElm327 implements ObdTransport {
       _protocolFound = false;
       return 'OK';
     }
-    if (RegExp(r'^SH([0-9A-F]{6})$').firstMatch(c) case final m?) {
+    if (RegExp(r'^SH([0-9A-F]{3}|[0-9A-F]{6})$').firstMatch(c) case final m?) {
       _header = m.group(1);
       return 'OK';
     }
@@ -181,6 +181,17 @@ final class SimulatedElm327 implements ObdTransport {
       case 0x04:
         _dtcs.clear();
         return _message([0x44]);
+      // Заглушка блока данных производителя для тестов разведки и сырой записи:
+      // раскладка выдуманная (ОЖ+40, обороты/40), настоящая у ВАЗ — по журналам.
+      case 0x21 when bytes.length == 2 && bytes[1] == 0x01 && _header == '7E0':
+        return _message([
+          0x61,
+          0x01,
+          (_engine.value(0x05, _seconds)! + 40).round().clamp(0, 255),
+          (_engine.value(0x0C, _seconds)! / 40).round().clamp(0, 255),
+        ]);
+      case 0x21 || 0x22 || 0x1A || 0x10:
+        return _message([0x7F, bytes[0], 0x11]);
       case 0x09 when bytes.length == 2 && bytes[1] == 0x02 && !_isCan:
         // Старые протоколы: пять кадров «49 02 N» по 4 байта, первый добит нулями.
         final chars = [0, 0, 0, ...ascii.encode(vin)];

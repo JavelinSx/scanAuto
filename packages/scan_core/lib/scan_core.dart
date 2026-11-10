@@ -5,6 +5,7 @@ export 'src/ai/ai_client.dart';
 export 'src/ai/prompts.dart';
 export 'src/analysis/analysis_packet.dart';
 export 'src/analysis/lttb.dart';
+export 'src/elm327/ecu_probe.dart';
 export 'src/elm327/elm327.dart';
 export 'src/elm327/elm_response.dart';
 export 'src/hex.dart';

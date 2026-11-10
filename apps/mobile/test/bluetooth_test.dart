@@ -145,6 +145,8 @@ void main() {
       expect(live.dtcs, ['P0171']);
       expect((adapters.saved! as BluetoothTarget).address, adapter.address);
       expect(log.lines, contains('[elm] TX ATZ'));
+      // Разведка блока: симулятор отвечает на 21 01 — блок пишется в запись.
+      expect(log.lines, contains(startsWith('[vaz] блок данных 2101')));
       expect(
         log.lines.any((l) => l.startsWith('[elm] адаптер ELM327')),
         isTrue,

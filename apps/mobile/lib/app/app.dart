@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../core/background_session.dart';
 import '../features/ai/ai_screen.dart';
 import '../features/connect/connect_screen.dart';
 import '../features/live/live_screen.dart';
@@ -40,8 +41,13 @@ class _ScanAutoAppState extends ConsumerState<ScanAutoApp> {
   // Сворачивание и выключение экрана — в журнал сеанса: так видно,
   // откуда пауза в записи.
   late final _lifecycle = AppLifecycleListener(
-    onStateChange: (s) =>
-        ref.read(scanControllerProvider.notifier).logLifecycle(s.name),
+    onStateChange: (s) {
+      ref.read(scanControllerProvider.notifier).logLifecycle(s.name);
+      // Вернулись из настроек — проверить, сняли ли ограничение батареи.
+      if (s == AppLifecycleState.resumed) {
+        ref.invalidate(backgroundStatusProvider);
+      }
+    },
   );
 
   @override
