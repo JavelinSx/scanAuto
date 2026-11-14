@@ -10,16 +10,19 @@ import 'package:scanauto/features/live/scan_controller.dart';
 
 /// Адаптер «по Bluetooth»: симулятор, у которого можно оборвать связь.
 class _DroppableTransport implements ObdTransport {
-  _DroppableTransport() {
+  _DroppableTransport({int canErrors = 0})
+    : _sim = SimulatedElm327(
+        scenario: SimScenario.vacuumLeak,
+        latency: const Duration(milliseconds: 2),
+        requiredProtocol: canErrors > 0 ? '6' : null,
+        canErrors: canErrors,
+      ) {
     _sim.input.listen((b) {
       if (!_input.isClosed) _input.add(b);
     }, onDone: drop);
   }
 
-  final _sim = SimulatedElm327(
-    scenario: SimScenario.vacuumLeak,
-    latency: const Duration(milliseconds: 2),
-  );
+  final SimulatedElm327 _sim;
   final _input = StreamController<List<int>>();
 
   void drop() {
@@ -43,6 +46,9 @@ class _FakeBluetooth implements BluetoothClassic {
   final connects = <String>[];
   _DroppableTransport? last;
 
+  /// Адаптер «неплотно в разъёме»: столько раз CAN ERROR.
+  int canErrors = 0;
+
   @override
   Future<bool> ensurePermission() async => true;
 
@@ -54,7 +60,7 @@ class _FakeBluetooth implements BluetoothClassic {
   @override
   Future<ObdTransport> connect(String address) async {
     connects.add(address);
-    return last = _DroppableTransport();
+    return last = _DroppableTransport(canErrors: canErrors);
   }
 
   @override
@@ -209,5 +215,20 @@ void main() {
     expect(log.lines, contains(startsWith('[elm] PROTOCOL сохранённый')));
     expect(log.lines.any((l) => l.contains('[elm] TX ATSP0')), isFalse);
     await controller.disconnect();
+  });
+
+  test('адаптер не видит шину CAN — понятное сообщение', () async {
+    bluetooth.canErrors = 1000;
+    final controller = container.read(scanControllerProvider.notifier);
+    unawaited(controller.connect(adapter));
+    final failed = await _waitFor(
+      container,
+      (s) => s.phase == ScanPhase.failed,
+    );
+    expect(failed.error, contains('шиной CAN'));
+    expect(
+      log.lines,
+      contains(startsWith('[elm] PROTOCOL CAN ERROR, повтор 3 из 3')),
+    );
   });
 }

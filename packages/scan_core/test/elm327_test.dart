@@ -191,6 +191,68 @@ void main() {
     await elm.close();
   });
 
+  test(
+    'короткий CAN ERROR: повторы с закрытием протокола находят CAN',
+    () async {
+      final lines = <String>[];
+      final progress = <String>[];
+      final elm = Elm327(
+        SimulatedElm327(latency: Duration.zero, canErrors: 2),
+        log: lines.add,
+        canRetryDelay: Duration.zero,
+      );
+      final info = await elm.initialize(onProgress: progress.add);
+      expect(info.protocol, 6);
+      expect(
+        lines.where((l) => l.startsWith('PROTOCOL CAN ERROR, повтор')),
+        hasLength(2),
+      );
+      expect(lines.where((l) => l == 'TX ATPC'), hasLength(2));
+      expect(progress, contains(startsWith('Шина CAN не отвечает')));
+      // До K-Line не дошло: CAN ожил на повторе.
+      expect(lines.any((l) => l == 'TX ATSP5'), isFalse);
+      await elm.close();
+    },
+  );
+
+  test('сохранённый CAN с коротким CAN ERROR — без автопоиска', () async {
+    final lines = <String>[];
+    final elm = Elm327(
+      SimulatedElm327(latency: Duration.zero, canErrors: 1),
+      log: lines.add,
+      canRetryDelay: Duration.zero,
+    );
+    final info = await elm.initialize(preferred: '6');
+    expect(info.protocol, 6);
+    expect(lines.any((l) => l == 'TX ATSP0'), isFalse);
+    await elm.close();
+  });
+
+  test(
+    'CAN ERROR не проходит — ошибка про шину CAN, а не «машина молчит»',
+    () async {
+      final elm = Elm327(
+        SimulatedElm327(
+          latency: Duration.zero,
+          requiredProtocol: '6',
+          canErrors: 1000,
+        ),
+        canRetryDelay: Duration.zero,
+      );
+      await expectLater(
+        elm.initialize(),
+        throwsA(
+          isA<ElmException>().having(
+            (e) => e.error,
+            'error',
+            ElmError.canError,
+          ),
+        ),
+      );
+      await elm.close();
+    },
+  );
+
   test('ключ протокола туда и обратно', () {
     expect(ProtocolAttempt.fromKey('6')?.key, '6');
     expect(ProtocolAttempt.fromKey('5:8110F1')?.header, '8110F1');

@@ -127,7 +127,12 @@ final _voltagePattern = RegExp(r'(\d+(?:\.\d+)?)\s*V', caseSensitive: false);
 class Elm327 {
   /// [log] получает каждую строку обмена: «TX 010C», «RX 41 0C 1A F8⏎⏎»,
   /// тайм-ауты и отброшенные ответы — для журнала реальных прогонов.
-  Elm327(this._transport, {this.log}) {
+  Elm327(
+    this._transport, {
+    this.log,
+    this.canRetries = 3,
+    this.canRetryDelay = const Duration(milliseconds: 1500),
+  }) {
     _subscription = _transport.input.listen(
       _onData,
       onError: _failPending,
@@ -141,6 +146,15 @@ class Elm327 {
 
   final ObdTransport _transport;
   final void Function(String line)? log;
+
+  /// `CAN ERROR` на явном CAN часто короткий — сразу после пуска двигателя, на
+  /// холоде, при неплотном адаптере: повторяем столько раз с этой паузой.
+  final int canRetries;
+  final Duration canRetryDelay;
+
+  /// Был ли за подключение `CAN ERROR`: тогда итоговая ошибка — про шину CAN,
+  /// а не «машина не отвечает».
+  bool _sawCanError = false;
   late final StreamSubscription<List<int>> _subscription;
   final _buffer = StringBuffer();
   Completer<String>? _pending;
@@ -225,6 +239,7 @@ class Elm327 {
     void Function(String status)? onProgress,
     String? preferred,
   }) async {
+    _sawCanError = false;
     final reset = await _reset();
     final version =
         _versionPattern.firstMatch(reset)?.group(0) ??
@@ -243,7 +258,11 @@ class Elm327 {
       try {
         await send('ATSP${saved.protocol}');
         if (saved.header case final header?) await send('ATSH$header');
-        final raw = await _firstRequest(const Duration(seconds: 10));
+        final raw = await _firstRequestRetrying(
+          saved.protocol,
+          const Duration(seconds: 10),
+          onProgress,
+        );
         log?.call('PROTOCOL ответила: $saved');
         return await _finishInit(raw, version, voltage, saved);
       } on ElmException catch (e) {
@@ -343,7 +362,11 @@ class Elm327 {
       await send('ATSP${a.protocol}');
       if (a.header case final header?) await send('ATSH$header');
       try {
-        final raw = await _firstRequest(const Duration(seconds: 10));
+        final raw = await _firstRequestRetrying(
+          a.protocol,
+          const Duration(seconds: 10),
+          onProgress,
+        );
         log?.call('PROTOCOL ответила: $a');
         return (raw, a);
       } on ElmException catch (e) {
@@ -354,7 +377,36 @@ class Elm327 {
         log?.call('PROTOCOL нет ответа: тайм-аут');
       }
     }
-    throw ElmException(ElmError.unableToConnect, last.raw);
+    throw ElmException(
+      _sawCanError ? ElmError.canError : ElmError.unableToConnect,
+      last.raw,
+    );
+  }
+
+  /// 0100 по выставленному протоколу; на CAN при `CAN ERROR` — повторы с паузой
+  /// и закрытием протокола (ATPC), чтобы адаптер заново поднял шину.
+  Future<String> _firstRequestRetrying(
+    String protocol,
+    Duration timeout,
+    void Function(String status)? onProgress,
+  ) async {
+    final can = (int.tryParse(protocol, radix: 16) ?? 0) >= 6;
+    for (var retry = 1; ; retry++) {
+      try {
+        return await _firstRequest(timeout);
+      } on ElmException catch (e) {
+        if (e.error != ElmError.canError || !can) rethrow;
+        _sawCanError = true;
+        if (retry > canRetries) rethrow;
+        log?.call('PROTOCOL CAN ERROR, повтор $retry из $canRetries');
+        onProgress?.call(
+          'Шина CAN не отвечает, повтор $retry из $canRetries… '
+          'Проверьте, что адаптер вставлен плотно',
+        );
+        await Future<void>.delayed(canRetryDelay);
+        await send('ATPC');
+      }
+    }
   }
 
   Future<void> _expectOk(String command) async {

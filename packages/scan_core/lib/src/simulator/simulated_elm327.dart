@@ -20,7 +20,9 @@ final class SimulatedElm327 implements ObdTransport {
     this.requiredProtocol,
     this.requiredHeader,
     this.misfires = const {},
-  }) : _clock = clock ?? _stopwatchClock(),
+    int canErrors = 0,
+  }) : _canErrorsLeft = canErrors,
+       _clock = clock ?? _stopwatchClock(),
        _engine = SimEngine(scenario, seed: seed, ambient: ambient),
        _dtcs = [...scenario.dtcs];
 
@@ -36,6 +38,10 @@ final class SimulatedElm327 implements ObdTransport {
   /// Пропуски по цилиндрам за текущую поездку для режима 06 (цилиндр → счёт).
   /// Среднее за 10 поездок симулятор отдаёт как половину.
   final Map<int, int> misfires;
+
+  /// Сколько раз явный CAN ответит `CAN ERROR`, прежде чем шина «оживёт»
+  /// (автопоиск в это время не находит протокол) — как неплотный адаптер.
+  int _canErrorsLeft;
 
   String _protocol = '0';
   String? _header;
@@ -97,6 +103,13 @@ final class SimulatedElm327 implements ObdTransport {
     final searching = _protocolFound || _protocol != '0'
         ? ''
         : 'SEARCHING...\r';
+    if (_canErrorsLeft > 0) {
+      if (_protocol == '0') return '${searching}UNABLE TO CONNECT';
+      if (_protocol == '6') {
+        _canErrorsLeft--;
+        return 'CAN ERROR';
+      }
+    }
     if (requiredProtocol case final required?) {
       final answers =
           _protocol == required &&
@@ -139,6 +152,7 @@ final class SimulatedElm327 implements ObdTransport {
       case 'RV':
         return '${(_engine.value(0x42, _seconds)! - 0.2).toStringAsFixed(1)}V';
     }
+    if (c == 'PC') return 'OK';
     if (RegExp(r'^SP([0-9A-C])$').firstMatch(c) case final m?) {
       _protocol = m.group(1)!;
       _protocolFound = false;
