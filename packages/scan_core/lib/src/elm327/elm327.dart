@@ -132,6 +132,8 @@ class Elm327 {
     this.log,
     this.canRetries = 3,
     this.canRetryDelay = const Duration(milliseconds: 1500),
+    this.canWaitTries = 45,
+    this.canWaitStep = const Duration(seconds: 2),
   }) {
     _subscription = _transport.input.listen(
       _onData,
@@ -151,6 +153,12 @@ class Elm327 {
   /// холоде, при неплотном адаптере: повторяем столько раз с этой паузой.
   final int canRetries;
   final Duration canRetryDelay;
+
+  /// Если быстрый проход не нашёл протокол, а CAN отвечал `CAN ERROR`, — сколько
+  /// ещё ждать шину CAN: [canWaitTries] попыток через [canWaitStep] (по умолчанию
+  /// полторы минуты).
+  final int canWaitTries;
+  final Duration canWaitStep;
 
   /// Был ли за подключение `CAN ERROR`: тогда итоговая ошибка — про шину CAN,
   /// а не «машина не отвечает».
@@ -337,6 +345,11 @@ class Elm327 {
     for (final c in const ['ATS0', 'ATH0', 'ATAT1']) {
       await send(c);
     }
+    // «Забыть события» (ELM327 v1.3a+). Фатальная ошибка CAN (ERR94) — её ловит
+    // адаптер, оставленный в разъёме при пуске двигателя, — запрещает поиск по
+    // протоколам CAN до выключения питания адаптера, и ATZ этот запрет не снимает.
+    // Клоны без этой команды ответят «?», это не мешает.
+    await send('ATFE');
     return reset;
   }
 
@@ -377,10 +390,51 @@ class Elm327 {
         log?.call('PROTOCOL нет ответа: тайм-аут');
       }
     }
-    throw ElmException(
-      _sawCanError ? ElmError.canError : ElmError.unableToConnect,
-      last.raw,
+    if (_sawCanError) {
+      if (await _waitForCan(onProgress) case final raw?) {
+        return (raw, protocolFallbacks.firstWhere((a) => a.protocol == '6'));
+      }
+      throw ElmException(ElmError.canError, last.raw);
+    }
+    throw ElmException(ElmError.unableToConnect, last.raw);
+  }
+
+  /// Шина CAN есть (адаптер получал `CAN ERROR`), но молчит. На Гранте на холодную
+  /// она оживает через секунды или минуты после пуска — Car Scanner ждёт около
+  /// минуты. Ждём до [canWaitTries] попыток с паузой [canWaitStep]; раз в 5 попыток
+  /// полный сброс адаптера, на случай если его CAN-часть «зависла».
+  Future<String?> _waitForCan(void Function(String status)? onProgress) async {
+    final total = canWaitStep * canWaitTries;
+    log?.call(
+      'PROTOCOL жду шину CAN: до $canWaitTries попыток, '
+      'каждые ${canWaitStep.inMilliseconds} мс',
     );
+    for (var i = 1; i <= canWaitTries; i++) {
+      final left = total - canWaitStep * (i - 1);
+      onProgress?.call(
+        'Жду шину CAN машины… осталось ${left.inSeconds} с. '
+        'На холодную она может ответить не сразу',
+      );
+      await Future<void>.delayed(canWaitStep);
+      if (i % 5 == 1) {
+        await _reset();
+        await send('ATSP6');
+      } else {
+        await send('ATPC');
+      }
+      try {
+        final raw = await _firstRequest(const Duration(seconds: 5));
+        log?.call('PROTOCOL CAN ожил на попытке $i из $canWaitTries');
+        return raw;
+      } on ElmException catch (e) {
+        if (!_noAnswer.contains(e.error)) rethrow;
+        log?.call('PROTOCOL CAN ждём, попытка $i: ${e.error.name}');
+      } on ElmTimeoutException {
+        log?.call('PROTOCOL CAN ждём, попытка $i: тайм-аут');
+      }
+    }
+    log?.call('PROTOCOL CAN так и не ответил');
+    return null;
   }
 
   /// 0100 по выставленному протоколу; на CAN при `CAN ERROR` — повторы с паузой
@@ -396,6 +450,17 @@ class Elm327 {
         return await _firstRequest(timeout);
       } on ElmException catch (e) {
         if (e.error != ElmError.canError || !can) rethrow;
+        if (!_sawCanError) {
+          // Счётчики ошибок CAN-модуля адаптера: «OFF» — передатчик отключился
+          // от шины из-за ошибок. Для журнала: отличить шину от адаптера.
+          try {
+            log?.call(
+              'PROTOCOL состояние CAN адаптера: ${(await send('ATCS')).trim()}',
+            );
+          } on Object {
+            // Не все клоны знают ATCS.
+          }
+        }
         _sawCanError = true;
         if (retry > canRetries) rethrow;
         log?.call('PROTOCOL CAN ERROR, повтор $retry из $canRetries');

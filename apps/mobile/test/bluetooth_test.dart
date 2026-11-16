@@ -217,18 +217,29 @@ void main() {
     await controller.disconnect();
   });
 
-  test('адаптер не видит шину CAN — понятное сообщение', () async {
-    bluetooth.canErrors = 1000;
+  test('шина CAN отвечает не сразу — подключение её дожидается', () async {
+    // 4 CAN ERROR уходят на быстрый проход, ещё 2 — на ожидание шины.
+    bluetooth.canErrors = 6;
     final controller = container.read(scanControllerProvider.notifier);
     unawaited(controller.connect(adapter));
-    final failed = await _waitFor(
-      container,
-      (s) => s.phase == ScanPhase.failed,
-    );
-    expect(failed.error, contains('шиной CAN'));
+    final done = Completer<ScanState>();
+    final sub = container.listen(scanControllerProvider, (_, next) {
+      if ((next.phase == ScanPhase.live || next.phase == ScanPhase.failed) &&
+          !done.isCompleted) {
+        done.complete(next);
+      }
+    });
+    final state = await done.future.timeout(const Duration(seconds: 40));
+    sub.close();
+    expect(state.phase, ScanPhase.live, reason: state.error);
+    expect(log.lines, contains('[elm] PROTOCOL CAN ожил на попытке 3 из 45'));
+    await controller.disconnect();
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test('сообщение про шину CAN', () {
     expect(
-      log.lines,
-      contains(startsWith('[elm] PROTOCOL CAN ERROR, повтор 3 из 3')),
+      describeScanError(ElmException(ElmError.canError, 'CAN ERROR')),
+      allOf(contains('Шина CAN'), contains('Выньте адаптер')),
     );
   });
 }

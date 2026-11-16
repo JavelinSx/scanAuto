@@ -238,6 +238,8 @@ void main() {
           canErrors: 1000,
         ),
         canRetryDelay: Duration.zero,
+        canWaitStep: Duration.zero,
+        canWaitTries: 5,
       );
       await expectLater(
         elm.initialize(),
@@ -252,6 +254,64 @@ void main() {
       await elm.close();
     },
   );
+
+  test('шина CAN оживает через минуту — дожидаемся, как Car Scanner', () async {
+    final lines = <String>[];
+    final progress = <String>[];
+    final elm = Elm327(
+      // Быстрый проход съедает 4 CAN ERROR (попытка и 3 повтора), ещё 8 — ожидание.
+      SimulatedElm327(
+        latency: Duration.zero,
+        requiredProtocol: '6',
+        canErrors: 12,
+      ),
+      log: lines.add,
+      canRetryDelay: Duration.zero,
+      canWaitStep: Duration.zero,
+    );
+    final info = await elm.initialize(onProgress: progress.add);
+    expect(info.protocol, 6);
+    expect(info.protocolKey, '6');
+    expect(lines, contains('PROTOCOL CAN ожил на попытке 9 из 45'));
+    expect(progress, contains(startsWith('Жду шину CAN машины… осталось')));
+    // Раз в 5 попыток — полный сброс адаптера.
+    expect(lines.where((l) => l == 'TX ATZ').length, greaterThan(6));
+    await elm.close();
+  });
+
+  test('ERR94 после пуска двигателя: ATFE снимает запрет CAN сразу', () async {
+    final lines = <String>[];
+    final elm = Elm327(
+      SimulatedElm327(latency: Duration.zero, err94: true),
+      log: lines.add,
+    );
+    final info = await elm.initialize();
+    expect(info.protocol, 6);
+    // Автопоиск нашёл CAN с первого раза: ATFE ушёл сразу после ATZ.
+    expect(lines.any((l) => l.contains('автопоиск не нашёл')), isFalse);
+    final sent = [
+      for (final l in lines)
+        if (l.startsWith('TX ')) l.substring(3),
+    ];
+    expect(sent.indexOf('ATFE'), greaterThan(sent.indexOf('ATZ')));
+    expect(sent.indexOf('ATFE'), lessThan(sent.indexOf('0100')));
+    await elm.close();
+  });
+
+  test('при CAN ERROR состояние CAN адаптера пишется в журнал', () async {
+    final lines = <String>[];
+    final elm = Elm327(
+      SimulatedElm327(latency: Duration.zero, canErrors: 2),
+      log: lines.add,
+      canRetryDelay: Duration.zero,
+    );
+    await elm.initialize();
+    expect(
+      lines.where((l) => l.startsWith('PROTOCOL состояние CAN адаптера:')),
+      hasLength(1),
+    );
+    await elm.close();
+  });
 
   test('ключ протокола туда и обратно', () {
     expect(ProtocolAttempt.fromKey('6')?.key, '6');
