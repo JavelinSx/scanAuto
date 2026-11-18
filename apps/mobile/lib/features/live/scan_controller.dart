@@ -322,9 +322,31 @@ class ScanController extends Notifier<ScanState> {
             'PID: ${[for (final p in info.supportedPids) hexByte(p)].join(' ')}',
       );
       status('Чтение ошибок…');
+      // Связь есть, но шина может быть неустойчивой: коды и VIN не прочитались —
+      // не повод обрывать сеанс, опрос параметров важнее.
+      Future<T> tolerant<T>(
+        String what,
+        Future<T> Function() read,
+        T empty,
+      ) async {
+        try {
+          return await read();
+        } on ElmException catch (e) {
+          _log.write('dtc', '$what не прочитаны: ${e.error.name}');
+          return empty;
+        } on ElmTimeoutException {
+          _log.write('dtc', '$what не прочитаны: тайм-аут');
+          return empty;
+        }
+      }
+
       final vin = resume ? state.vin : await elm.readVin();
-      final dtcs = await elm.readDtcs();
-      final pending = await elm.readDtcs(mode: 0x07);
+      final dtcs = await tolerant('коды', elm.readDtcs, const <String>[]);
+      final pending = await tolerant(
+        'ожидающие коды',
+        () => elm.readDtcs(mode: 0x07),
+        const <String>[],
+      );
       _log.write(
         'dtc',
         'сохранённые: ${dtcs.join(', ')}; ожидающие: ${pending.join(', ')}'

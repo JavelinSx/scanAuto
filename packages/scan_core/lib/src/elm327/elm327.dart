@@ -315,7 +315,17 @@ class Elm327 {
       final next = base + 0x20;
       if (next > 0xE0 || !supported.contains(next)) break;
       base = next;
-      raw = await send('01${hexByte(base)}');
+      // Связь уже есть (0100 ответил). Следующая группа может не прийти с первого
+      // раза — блок занят, шина неустойчива: повторяем, а не отдав — работаем с тем,
+      // что уже знаем. Раньше NO DATA здесь обрывал всё подключение (Гранта, 17.11).
+      final more = await _supportedGroup('01${hexByte(base)}');
+      if (more == null) {
+        log?.call(
+          'PROTOCOL группа ${hexByte(base)} не прочитана — работаем без неё',
+        );
+        break;
+      }
+      raw = more;
     }
 
     final dpn = await send('ATDPN');
@@ -333,6 +343,23 @@ class Elm327 {
       attempt: attempt,
       voltage: voltage,
     );
+  }
+
+  /// Запрос группы поддерживаемых PID с тремя попытками; null — блок не ответил.
+  Future<String?> _supportedGroup(String command) async {
+    for (var i = 1; i <= 3; i++) {
+      try {
+        final raw = await send(command);
+        parseObdResponse(raw, command: command);
+        return raw;
+      } on ElmException catch (e) {
+        log?.call('PROTOCOL $command: ${e.error.name}, попытка $i из 3');
+      } on ElmTimeoutException {
+        log?.call('PROTOCOL $command: тайм-аут, попытка $i из 3');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+    return null;
   }
 
   /// ATZ и настройка: после него сброшены протокол и заголовок.
@@ -459,6 +486,19 @@ class Elm327 {
             );
           } on Object {
             // Не все клоны знают ATCS.
+          }
+          // Программируемые параметры адаптера хранятся в его памяти и переживают
+          // сброс и выключение: если их поменяло другое приложение, это видно здесь.
+          try {
+            final pps = await send(
+              'ATPPS',
+              timeout: const Duration(seconds: 3),
+            );
+            log?.call(
+              'PROTOCOL параметры адаптера: ${pps.replaceAll('\r', ' ').trim()}',
+            );
+          } on Object {
+            // Не все клоны знают ATPPS.
           }
         }
         _sawCanError = true;

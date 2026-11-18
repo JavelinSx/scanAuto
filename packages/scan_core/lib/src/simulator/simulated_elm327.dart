@@ -22,6 +22,7 @@ final class SimulatedElm327 implements ObdTransport {
     this.misfires = const {},
     int canErrors = 0,
     this._err94 = false,
+    this._noData0120 = 0,
   }) : _canErrorsLeft = canErrors,
        _clock = clock ?? _stopwatchClock(),
        _engine = SimEngine(scenario, seed: seed, ambient: ambient),
@@ -47,6 +48,10 @@ final class SimulatedElm327 implements ObdTransport {
   /// Адаптер поймал фатальную ошибку CAN (ERR94) при пуске двигателя: CAN
   /// недоступен, пока не придёт ATFE (ATZ запрет не снимает), — как настоящий ELM327.
   bool _err94;
+
+  /// Сколько раз группа PID 0120 ответит NO DATA, хотя 0100 уже ответил —
+  /// как занятый блок на неустойчивой шине (Гранта, 17.11).
+  int _noData0120;
 
   String _protocol = '0';
   String? _header;
@@ -189,6 +194,9 @@ final class SimulatedElm327 implements ObdTransport {
     final bytes = parseHexBytes(c);
     if (bytes == null || bytes.isEmpty) return '?';
     switch (bytes[0]) {
+      case 0x01 when bytes.length == 2 && bytes[1] == 0x20 && _noData0120 > 0:
+        _noData0120--;
+        return 'NO DATA';
       case 0x01 when bytes.length == 2:
         final data = _engine.mode01(bytes[1], _seconds);
         return data == null ? 'NO DATA' : _message([0x41, bytes[1], ...data]);

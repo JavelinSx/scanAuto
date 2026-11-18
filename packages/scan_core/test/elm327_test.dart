@@ -313,6 +313,40 @@ void main() {
     await elm.close();
   });
 
+  test(
+    '0100 ответил, 0120 — NO DATA: повтор, подключение не обрывается',
+    () async {
+      final lines = <String>[];
+      final elm = Elm327(
+        SimulatedElm327(latency: Duration.zero, noData0120: 2),
+        log: lines.add,
+      );
+      final info = await elm.initialize();
+      // Третья попытка 0120 удалась — вторая группа PID прочитана.
+      expect(info.supportedPids, containsAll([0x0C, 0x2F]));
+      expect(lines, contains('PROTOCOL 0120: noData, попытка 2 из 3'));
+      await elm.close();
+    },
+  );
+
+  test('0120 не отвечает совсем — работаем с первой группой PID', () async {
+    final lines = <String>[];
+    final elm = Elm327(
+      SimulatedElm327(latency: Duration.zero, noData0120: 100),
+      log: lines.add,
+    );
+    final info = await elm.initialize();
+    expect(info.protocol, 6);
+    expect(info.supportedPids, contains(0x0C));
+    expect(info.supportedPids, isNot(contains(0x2F)));
+    expect(
+      lines,
+      contains('PROTOCOL группа 20 не прочитана — работаем без неё'),
+    );
+    expect(await elm.readPid(pidsByKey['rpm']!), isNotNull);
+    await elm.close();
+  });
+
   test('ключ протокола туда и обратно', () {
     expect(ProtocolAttempt.fromKey('6')?.key, '6');
     expect(ProtocolAttempt.fromKey('5:8110F1')?.header, '8110F1');
