@@ -29,11 +29,15 @@ class _DroppableTransport implements ObdTransport {
     if (!_input.isClosed) _input.close();
   }
 
+  /// Запись больше не возвращается — как Bluetooth после заморозки в фоне.
+  bool hung = false;
+
   @override
   Stream<List<int>> get input => _input.stream;
 
   @override
-  Future<void> write(List<int> bytes) => _sim.write(bytes);
+  Future<void> write(List<int> bytes) =>
+      hung ? Completer<void>().future : _sim.write(bytes);
 
   @override
   Future<void> close() async {
@@ -49,6 +53,9 @@ class _FakeBluetooth implements BluetoothClassic {
   /// Адаптер «неплотно в разъёме»: столько раз CAN ERROR.
   int canErrors = 0;
 
+  /// Адаптер пропал совсем: подключение не проходит.
+  bool unreachable = false;
+
   @override
   Future<bool> ensurePermission() async => true;
 
@@ -60,6 +67,9 @@ class _FakeBluetooth implements BluetoothClassic {
   @override
   Future<ObdTransport> connect(String address) async {
     connects.add(address);
+    if (unreachable) {
+      throw BluetoothException('connect_failed', 'нет ответа');
+    }
     return last = _DroppableTransport(canErrors: canErrors);
   }
 
@@ -104,15 +114,14 @@ class _MemoryLog implements SessionLog {
 
 Future<ScanState> _waitFor(
   ProviderContainer container,
-  bool Function(ScanState) test,
-) {
+  bool Function(ScanState) test, {
+  Duration timeout = const Duration(seconds: 10),
+}) {
   final done = Completer<ScanState>();
   final sub = container.listen(scanControllerProvider, (_, next) {
     if (test(next) && !done.isCompleted) done.complete(next);
   }, fireImmediately: true);
-  return done.future
-      .timeout(const Duration(seconds: 10))
-      .whenComplete(sub.close);
+  return done.future.timeout(timeout).whenComplete(sub.close);
 }
 
 void main() {
@@ -123,6 +132,7 @@ void main() {
   late ProviderContainer container;
 
   setUp(() {
+    ScanController.autoReconnectDelay = const Duration(milliseconds: 10);
     bluetooth = _FakeBluetooth();
     adapters = _MemoryAdapters();
     log = _MemoryLog();
@@ -153,6 +163,23 @@ void main() {
       expect(log.lines, contains('[elm] TX ATZ'));
       // Разведка блока: симулятор отвечает на 21 01 — блок пишется в запись.
       expect(log.lines, contains(startsWith('[vaz] блок данных 2101')));
+      // Ускорение опроса, готовность и бортовые тесты — в журнале.
+      expect(
+        log.lines,
+        contains(
+          startsWith('[elm] PROTOCOL ускорение опроса: блоков ответило 1'),
+        ),
+      );
+      expect(
+        log.lines,
+        contains(startsWith('[readiness] начало: Check Engine')),
+      );
+      expect(
+        log.lines,
+        contains(startsWith('[mode06] начало: лямбда-зонд ряд 1 датчик 1')),
+      );
+      expect(live.recording!.readiness, isNotEmpty);
+      expect(live.recording!.monitorTests, isNotEmpty);
       expect(
         log.lines.any((l) => l.startsWith('[elm] адаптер ELM327')),
         isTrue,
@@ -172,7 +199,7 @@ void main() {
     },
   );
 
-  test('обрыв связи и переподключение: та же запись продолжается', () async {
+  Future<(ScanController, Recording, int)> startLive() async {
     final controller = container.read(scanControllerProvider.notifier);
     unawaited(controller.connect(adapter));
     final live = await _waitFor(
@@ -182,30 +209,101 @@ void main() {
           (s.recording?.series['rpm']?.length ?? 0) > 3,
     );
     final recording = live.recording!;
-    final before = recording.series['rpm']!.length;
+    return (controller, recording, recording.series['rpm']!.length);
+  }
 
+  test(
+    'обрыв связи: переподключается сам, та же запись продолжается',
+    () async {
+      final (controller, recording, before) = await startLive();
+
+      bluetooth.last!.drop();
+      final again = await _waitFor(
+        container,
+        (s) =>
+            s.phase == ScanPhase.live &&
+            recording.series['rpm']!.length > before + 3,
+      );
+      expect(again.recording, same(recording));
+      expect(bluetooth.connects, hasLength(2));
+      expect(log.lines, contains('[session] автопереподключение 1 из 3'));
+      expect(log.lines, contains('[session] переподключение'));
+      expect(log.lines.any((l) => l.startsWith('[error] обрыв')), isTrue);
+      await controller.disconnect();
+    },
+  );
+
+  test(
+    'запись в адаптер зависла: плашка «нет данных», потом переподключение',
+    () async {
+      final (controller, recording, before) = await startLive();
+
+      // Гранта, 18.11: после заморозки в фоне отправка не вернулась никогда.
+      bluetooth.last!.hung = true;
+      final stale = await _waitFor(container, (s) => s.staleSeconds > 0);
+      expect(stale.staleSeconds, greaterThanOrEqualTo(3));
+
+      // 5 тайм-аутов по 2 с (и по 0.3 с на сброс после каждого) + переподключение.
+      final again = await _waitFor(
+        container,
+        (s) =>
+            s.phase == ScanPhase.live &&
+            s.staleSeconds == 0 &&
+            recording.series['rpm']!.length > before + 3,
+        timeout: const Duration(seconds: 30),
+      );
+      expect(again.recording, same(recording));
+      expect(bluetooth.connects, hasLength(2));
+      expect(log.lines, contains(startsWith('[elm] TIMEOUT')));
+      expect(log.lines, contains('[session] автопереподключение 1 из 3'));
+      await controller.disconnect();
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
+
+  test('адаптер пропал совсем: три попытки, потом экран обрыва', () async {
+    final (controller, recording, _) = await startLive();
+
+    bluetooth.unreachable = true;
     bluetooth.last!.drop();
     final failed = await _waitFor(
       container,
       (s) => s.phase == ScanPhase.failed,
     );
-    expect(failed.error, 'Связь с адаптером потеряна.');
     expect(failed.recording, same(recording));
+    expect(failed.error, contains('Не удалось подключиться'));
+    expect(bluetooth.connects, hasLength(1 + ScanController.maxAutoReconnects));
+    expect(log.lines, contains('[session] автопереподключение 3 из 3'));
     expect(controller.canResume, isTrue);
 
+    // Кнопка «Переподключиться» снова даёт три попытки.
+    bluetooth.unreachable = false;
     unawaited(controller.reconnect());
-    final again = await _waitFor(
-      container,
-      (s) =>
-          s.phase == ScanPhase.live &&
-          recording.series['rpm']!.length > before + 3,
-    );
-    expect(again.recording, same(recording));
-    expect(bluetooth.connects, hasLength(2));
-    expect(log.lines, contains('[session] переподключение'));
-    expect(log.lines.any((l) => l.startsWith('[error] обрыв')), isTrue);
+    await _waitFor(container, (s) => s.phase == ScanPhase.live);
     await controller.disconnect();
   });
+
+  test('«Остановить» во время переподключения: запись остаётся', () async {
+    ScanController.autoReconnectDelay = const Duration(seconds: 5);
+    final (controller, recording, _) = await startLive();
+
+    bluetooth.last!.drop();
+    await _waitFor(
+      container,
+      (s) =>
+          s.phase == ScanPhase.connecting &&
+          (s.status ?? '').contains('переподключаюсь'),
+    );
+    await controller.stop();
+    final state = container.read(scanControllerProvider);
+    expect(state.phase, ScanPhase.finished);
+    expect(state.recording, same(recording));
+    expect(log.saved, same(recording));
+    // Отложенное переподключение не запустилось после остановки.
+    await Future<void>.delayed(const Duration(seconds: 6));
+    expect(bluetooth.connects, hasLength(1));
+    expect(container.read(scanControllerProvider).phase, ScanPhase.finished);
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('второе подключение идёт по сохранённому протоколу', () async {
     adapters.protocols['bt.${adapter.address}'] = '6';

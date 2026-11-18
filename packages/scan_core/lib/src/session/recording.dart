@@ -1,4 +1,5 @@
 import '../obd/mode06.dart';
+import '../obd/readiness.dart';
 
 /// Профиль машины. VIN хранится только на телефоне — в ИИ уходит [forModel].
 final class VehicleInfo {
@@ -214,6 +215,12 @@ final class Recording {
   /// Пропуски воспламенения по цилиндрам (режим 06): в начале и в конце сеанса.
   final List<MisfireReport> misfires = [];
 
+  /// Готовность самопроверок (PID 01): в начале и в конце сеанса.
+  final List<ReadinessReport> readiness = [];
+
+  /// Бортовые тесты режима 06 (лямбда-зонды, катализатор…): в начале и в конце.
+  final List<MonitorTestsReport> monitorTests = [];
+
   /// Сырые ответы на запросы производителя, по команде. В пакет для ИИ не идут.
   final Map<String, RawSeries> raw = {};
 
@@ -281,6 +288,10 @@ final class Recording {
       for (final s in series.values) s.key: {'t': s.tMs, 'v': s.values},
     },
     if (misfires.isNotEmpty) 'misfires': [for (final m in misfires) m.toJson()],
+    if (readiness.isNotEmpty)
+      'readiness': [for (final r in readiness) r.toJson()],
+    if (monitorTests.isNotEmpty)
+      'monitorTests': [for (final m in monitorTests) m.toJson()],
     if (raw.isNotEmpty)
       'raw': {
         for (final r in raw.values) r.command: {'t': r.tMs, 'hex': r.hex},
@@ -310,6 +321,14 @@ final class Recording {
     rec.misfires.addAll([
       for (final m in (json['misfires'] as List? ?? const []))
         MisfireReport.fromJson((m as Map).cast<String, Object?>()),
+    ]);
+    rec.readiness.addAll([
+      for (final r in (json['readiness'] as List? ?? const []))
+        ReadinessReport.fromJson((r as Map).cast<String, Object?>()),
+    ]);
+    rec.monitorTests.addAll([
+      for (final m in (json['monitorTests'] as List? ?? const []))
+        MonitorTestsReport.fromJson((m as Map).cast<String, Object?>()),
     ]);
     for (final MapEntry(:key, :value)
         in ((json['raw'] as Map?) ?? const {})

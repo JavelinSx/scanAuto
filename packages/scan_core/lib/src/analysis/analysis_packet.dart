@@ -22,7 +22,7 @@ abstract final class AnalysisPacket {
     final seriesOut = <Map<String, Object?>>[];
     for (final pid in standardPids) {
       final s = rec.series[pid.key];
-      if (s == null || s.isEmpty) continue;
+      if (s == null || s.isEmpty || _codeKeys.contains(pid.key)) continue;
       final digits = pid.decimals + 1;
       final stats = <String, Object?>{'all': _stats(s.values, digits)};
       if (idle != null) {
@@ -65,6 +65,39 @@ abstract final class AnalysisPacket {
       'derived': _derived(rec, idle),
       if (rec.segments.isNotEmpty)
         'stages': [for (final seg in rec.segments) stage(rec, seg)],
+      if (rec.readiness.isNotEmpty)
+        'readiness': {
+          'note':
+              'PID 01: готовность самопроверок блока. Незавершённая проверка '
+              '(incomplete) — блок её ещё не прогнал после сброса ошибок или '
+              'снятия клеммы; это не оценка исправности. t — секунда записи.',
+          'reads': [
+            for (final r in rec.readiness)
+              {
+                't': r.tMs ~/ 1000,
+                'mil': r.mil,
+                'dtc_count': r.dtcCount,
+                'complete': [
+                  for (final m in r.monitors)
+                    if (m.complete) m.key,
+                ],
+                'incomplete': [
+                  for (final m in r.monitors)
+                    if (!m.complete) m.key,
+                ],
+              },
+          ],
+        },
+      if (rec.monitorTests.isNotEmpty)
+        'monitor_tests': {
+          'note':
+              'Режим 06: результаты бортовых тестов блока на момент t (секунда '
+              'записи). failed — значение вне пределов, заданных блоком. Названия '
+              'тестов лямбда-зондов — по J1979, у производителя смысл может '
+              'отличаться; raw — масштаб единиц неизвестен.',
+          't': rec.monitorTests.last.tMs ~/ 1000,
+          'tests': [for (final t in rec.monitorTests.last.tests) t.describe()],
+        },
       if (rec.misfires.isNotEmpty)
         'misfires': {
           'note':
@@ -108,11 +141,18 @@ abstract final class AnalysisPacket {
     return {'idle_s': idleMs ~/ 1000, 'driving_s': drivingMs ~/ 1000};
   }
 
+  /// Коды состояния, а не величины: среднее и медиана по ним бессмысленны.
+  static const _codeKeys = {'fuel_sys'};
+
   static Map<String, Object?> _derived(
     Recording rec,
     bool Function(int)? idle,
   ) {
     final out = <String, Object?>{};
+    if (_fuelTrim(rec, idle: idle) case final trim?) out['fuel_trim'] = trim;
+    if (_fuelSystem(rec, (_) => true) case final fuel?) {
+      out['fuel_system'] = fuel;
+    }
 
     final coolant = rec.series['coolant'];
     if (coolant != null && coolant.isNotEmpty) {
@@ -144,6 +184,114 @@ abstract final class AnalysisPacket {
       };
     }
     return out;
+  }
+
+  /// Коррекции смеси парами «краткосрочная + долгосрочная» в одно время — их
+  /// сумма и есть полная поправка блока. Только в замкнутом контуре (PID 03),
+  /// а если его не опрашивали — на прогретом двигателе: на холодном блок
+  /// обогащает смесь сам. На холостых и в движении отдельно: подсос воздуха
+  /// виден на холостых и пропадает под нагрузкой, ошибка ДМРВ или давления
+  /// топлива — одинаково везде.
+  static Map<String, Object?>? _fuelTrim(
+    Recording rec, {
+    bool Function(int)? idle,
+    bool Function(int)? within,
+  }) {
+    final stft = rec.series['stft1'];
+    final ltft = rec.series['ltft1'];
+    if (stft == null || stft.isEmpty || ltft == null || ltft.isEmpty) {
+      return null;
+    }
+    final status = rec.series['fuel_sys'];
+    final hasStatus = status != null && status.isNotEmpty;
+    final coolant = rec.series['coolant'];
+    final groups = <String, List<(double, double)>>{
+      'all': [],
+      if (idle != null) 'idle': [],
+      if (idle != null) 'driving': [],
+    };
+    var excluded = 0;
+    for (var i = 0; i < stft.length; i++) {
+      final t = stft.tMs[i];
+      if (within != null && !within(t)) continue;
+      final l = _nearest(ltft, t, 5000);
+      if (l == null) continue;
+      final closed = hasStatus
+          ? _nearest(status, t, 15000)?.round() == fuelSystemClosed
+          : coolant == null || (_nearest(coolant, t, 15000) ?? 0) >= 70;
+      if (!closed) {
+        excluded++;
+        continue;
+      }
+      final pair = (stft.values[i], l);
+      groups['all']!.add(pair);
+      if (idle != null) groups[idle(t) ? 'idle' : 'driving']!.add(pair);
+    }
+    Map<String, Object?>? summary(List<(double, double)> pairs) {
+      if (pairs.length < 5) return null;
+      num median(Iterable<double> v) => _stats(v.toList(), 2)['median']! as num;
+      return {
+        'stft': median(pairs.map((p) => p.$1)),
+        'ltft': median(pairs.map((p) => p.$2)),
+        'total': median(pairs.map((p) => p.$1 + p.$2)),
+        'n': pairs.length,
+      };
+    }
+
+    final out = <String, Object?>{
+      'note':
+          'Коррекции смеси, %: плюс — блок доливает топливо (смесь была бедной), '
+          'минус — урезает (богатой). total = краткосрочная + долгосрочная, '
+          'медианы. ${hasStatus ? 'Только замкнутый контур (PID 03).' : 'Только прогретый двигатель (ОЖ от 70 °C), контур не опрашивался.'}',
+      for (final MapEntry(:key, :value) in groups.entries) key: ?summary(value),
+      'excluded_samples': excluded,
+    };
+    return out.containsKey('all') ? out : null;
+  }
+
+  /// Доля замеров в каждом состоянии топливной системы и когда блок впервые
+  /// перешёл в замкнутый контур.
+  static Map<String, Object?>? _fuelSystem(
+    Recording rec,
+    bool Function(int) within,
+  ) {
+    final s = rec.series['fuel_sys'];
+    if (s == null || s.isEmpty) return null;
+    final counts = <String, int>{};
+    int? firstClosed;
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      if (!within(s.tMs[i])) continue;
+      n++;
+      final text = fuelSystemText(s.values[i]);
+      counts[text] = (counts[text] ?? 0) + 1;
+      if (s.values[i].round() == fuelSystemClosed) firstClosed ??= s.tMs[i];
+    }
+    if (n == 0) return null;
+    return {
+      'shares': {
+        for (final MapEntry(:key, :value) in counts.entries)
+          key: _round(value / n, 2),
+      },
+      'first_closed_loop_s': firstClosed == null ? null : firstClosed ~/ 1000,
+      'n': n,
+    };
+  }
+
+  /// Значение ряда ближе всего к [t], если не дальше [maxGapMs].
+  static double? _nearest(Series s, int t, int maxGapMs) {
+    final i = s.lowerBound(t);
+    double? best;
+    var bestGap = maxGapMs + 1;
+    for (final j in [i - 1, i]) {
+      if (j < 0 || j >= s.length) continue;
+      final gap = (s.tMs[j] - t).abs();
+      if (gap < bestGap) {
+        bestGap = gap;
+        best = s.values[j];
+      }
+    }
+    return best;
   }
 
   /// Исправный узкополосный зонд до катализатора переключается через 0.45 В
@@ -187,7 +335,7 @@ abstract final class AnalysisPacket {
     final stats = <String, Object?>{};
     for (final pid in standardPids) {
       final s = rec.series[pid.key];
-      if (s == null || s.isEmpty) continue;
+      if (s == null || s.isEmpty || _codeKeys.contains(pid.key)) continue;
       final from = s.lowerBound(seg.startMs);
       final to = s.lowerBound(seg.endMs + 1);
       if (to - from < 2) continue;
@@ -233,6 +381,12 @@ abstract final class AnalysisPacket {
           seg.endMs + 1,
         );
       }
+    }
+    if (_fuelTrim(rec, within: seg.contains)?['all'] case final trim?) {
+      derived['fuel_trim'] = trim;
+    }
+    if (_fuelSystem(rec, seg.contains) case final fuel?) {
+      derived['fuel_system'] = fuel;
     }
     final o2 = rec.series['o2_b1s1'];
     if (o2 != null && o2.length > 1) {

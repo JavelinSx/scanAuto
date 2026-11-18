@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import '../hex.dart';
 import '../obd/dtc.dart';
 import '../obd/mode06.dart';
 import '../obd/pids.dart';
+import '../obd/readiness.dart';
 import '../transport/obd_transport.dart';
 import 'elm_response.dart';
 
@@ -16,6 +18,9 @@ final class ElmInfo {
     required this.supportedPids,
     this.attempt,
     this.voltage,
+    this.responders = 1,
+    this.responseCount = false,
+    this.multiPid = false,
   });
 
   /// Как адаптер себя назвал: «ELM327 v1.5». У клонов не значит ничего.
@@ -31,6 +36,16 @@ final class ElmInfo {
   /// Напряжение на разъёме при подключении (ATRV): с работающим двигателем
   /// обычно 13.5–14.5 В, с выключенным — 12–12.8 В.
   final double? voltage;
+
+  /// Сколько блоков ответило на 0100 функциональным запросом.
+  final int responders;
+
+  /// Адаптер понимает цифру числа ответов (`010C1`): не ждёт тайм-аут
+  /// после единственного ответа — опрос примерно вдвое быстрее (даташит ELM327).
+  final bool responseCount;
+
+  /// Блок отвечает на несколько PID в одном запросе (`01 0C 0D 05`, до 6 на CAN).
+  final bool multiPid;
 
   /// Что запомнить для следующего подключения ([Elm327.initialize] `preferred`).
   String? get protocolKey =>
@@ -192,10 +207,18 @@ class Elm327 {
     }
     _buffer.clear();
     final completer = _pending = Completer<String>();
+    // Обрыв во время зависшей записи завершит его ошибкой, когда ждать уже некому.
+    completer.future.ignore();
     log?.call('TX $command');
-    await _transport.write(ascii.encode('$command\r'));
+    Future<String> exchange() async {
+      await _transport.write(ascii.encode('$command\r'));
+      return completer.future;
+    }
+
     try {
-      return await completer.future.timeout(timeout);
+      // Тайм-аут и на саму отправку: Bluetooth после заморозки приложения в фоне
+      // может не вернуть запись никогда, и опрос встал бы навсегда (Гранта, 18.11).
+      return await exchange().timeout(timeout);
     } on TimeoutException {
       log?.call('TIMEOUT $command (${timeout.inMilliseconds} мс)');
       _needsResync = true;
@@ -305,6 +328,10 @@ class Elm327 {
     ProtocolAttempt? attempt,
   ) async {
     var raw = first;
+    final responders = parseObdResponse(
+      first,
+      command: '0100',
+    ).where((m) => m.length >= 2 && m[0] == 0x41 && m[1] == 0x00).length;
     final supported = <int>{};
     var base = 0x00;
     while (true) {
@@ -336,13 +363,68 @@ class Elm327 {
         ) ??
         0;
 
+    final isCan = protocol >= 6;
+    // Ускорение — только на CAN и когда отвечает один блок: иначе цифра «1»
+    // оборвала бы ответы остальных (даташит предупреждает о заторе на шине).
+    final fast = isCan && responders == 1
+        ? await _detectFastPolling(supported)
+        : (count: false, multi: false);
+    log?.call(
+      'PROTOCOL ускорение опроса: блоков ответило $responders, '
+      'цифра числа ответов — ${fast.count ? 'да' : 'нет'}, '
+      'несколько PID в запросе — ${fast.multi ? 'да' : 'нет'}',
+    );
+
     return _info = ElmInfo(
       version: version,
       protocol: protocol,
       supportedPids: supported,
       attempt: attempt,
       voltage: voltage,
+      responders: responders,
+      responseCount: fast.count,
+      multiPid: fast.multi,
     );
+  }
+
+  /// Проверка на живой машине, что клон и блок понимают ускорение. Не понял —
+  /// опрос как раньше: по одному PID, с ожиданием тайм-аута.
+  Future<({bool count, bool multi})> _detectFastPolling(
+    Set<int> supported,
+  ) async {
+    final probe = [
+      for (final code in const [0x0C, 0x0D, 0x05, 0x04, 0x11])
+        if (supported.contains(code)) code,
+    ];
+    if (probe.isEmpty) return (count: false, multi: false);
+
+    var count = false;
+    final single = '01${hexByte(probe.first)}1';
+    try {
+      final messages = parseObdResponse(await send(single), command: single);
+      count = mode01Data(messages, probe.first) != null;
+    } on ElmException {
+      // «?» — клон не знает цифру числа ответов.
+    } on ElmTimeoutException {
+      // Опоздавший ответ отбросит следующий запрос.
+    }
+
+    var multi = false;
+    if (probe.length >= 2) {
+      final codes = probe.take(3).toList();
+      final command = '01${codes.map(hexByte).join()}';
+      try {
+        final values = _parseMultiPid(
+          parseObdResponse(await send(command), command: command),
+        );
+        multi = codes.every(values.containsKey);
+      } on ElmException {
+        // Блок не понял — работаем по одному.
+      } on ElmTimeoutException {
+        // Так же.
+      }
+    }
+    return (count: count, multi: multi);
   }
 
   /// Запрос группы поддерживаемых PID с тремя попытками; null — блок не ответил.
@@ -523,10 +605,14 @@ class Elm327 {
 
   /// Значение PID или null, если машина его не отдаёт.
   Future<double?> readPid(Pid pid) async {
+    // Один ответ на CAN — один кадр: адаптер отдаёт его, не дожидаясь тайм-аута.
+    final command = (_info?.responseCount ?? false)
+        ? '${pid.command}1'
+        : pid.command;
     try {
-      final raw = await send(pid.command);
+      final raw = await send(command);
       final data = mode01Data(
-        parseObdResponse(raw, command: pid.command),
+        parseObdResponse(raw, command: command),
         pid.code,
       );
       return data == null ? null : pid.decode(data);
@@ -534,6 +620,114 @@ class Elm327 {
       if (e.error == ElmError.noData) return null;
       rethrow;
     }
+  }
+
+  /// Не больше стольких PID в одном запросе — предел J1979 для CAN.
+  static const maxPidsPerRequest = 6;
+
+  /// Несколько PID одним запросом, если блок это умеет ([ElmInfo.multiPid]),
+  /// иначе по одному. Ключ — [Pid.key]; не ответивший PID в результат не попадает.
+  Future<Map<String, double>> readPids(List<Pid> pids) async {
+    final out = <String, double>{};
+    if (!(_info?.multiPid ?? false) || pids.length < 2) {
+      for (final pid in pids) {
+        final v = await readPid(pid);
+        if (v != null) out[pid.key] = v;
+      }
+      return out;
+    }
+    for (var i = 0; i < pids.length; i += maxPidsPerRequest) {
+      final chunk = pids.sublist(i, min(i + maxPidsPerRequest, pids.length));
+      if (chunk.length == 1) {
+        final v = await readPid(chunk.single);
+        if (v != null) out[chunk.single.key] = v;
+        continue;
+      }
+      // Ответ длиннее одного кадра — без цифры числа ответов: адаптер сам
+      // собирает многокадровый ответ и ждёт его конца.
+      final command = '01${chunk.map((p) => hexByte(p.code)).join()}';
+      try {
+        final raw = await send(command);
+        final values = _parseMultiPid(parseObdResponse(raw, command: command));
+        for (final pid in chunk) {
+          if (values[pid.code] case final data?) {
+            final v = pid.decode(data);
+            if (v != null) out[pid.key] = v;
+          }
+        }
+      } on ElmException catch (e) {
+        if (e.error != ElmError.noData) rethrow;
+      }
+    }
+    return out;
+  }
+
+  /// Ответ на запрос нескольких PID: `41`, затем PID и его байты, PID за PID
+  /// (порядок может не совпадать с запросом). Длины берутся из [pidsByCode];
+  /// незнакомый PID обрывает разбор — дальше границы не понять.
+  static Map<int, List<int>> _parseMultiPid(List<List<int>> messages) {
+    final out = <int, List<int>>{};
+    for (final m in messages) {
+      if (m.isEmpty || m[0] != 0x41) continue;
+      var i = 1;
+      while (i < m.length) {
+        final code = m[i];
+        final length = code % 0x20 == 0 ? 4 : pidsByCode[code]?.byteCount;
+        if (length == null || i + 1 + length > m.length) break;
+        out[code] = m.sublist(i + 1, i + 1 + length);
+        i += 1 + length;
+      }
+    }
+    return out;
+  }
+
+  /// Готовность бортовых самопроверок (PID 01). null — блок не ответил.
+  Future<ReadinessReport?> readReadiness({int tMs = 0}) async {
+    try {
+      final raw = await send('0101');
+      final data = mode01Data(parseObdResponse(raw, command: '0101'), 0x01);
+      return data == null ? null : ReadinessReport.parse(data, tMs: tMs);
+    } on ElmException {
+      return null;
+    }
+  }
+
+  /// Все бортовые тесты режима 06, которые есть у блока (только CAN): маски
+  /// поддерживаемых MID по цепочке 00 → 20 → 40…, затем каждый MID.
+  /// Пропуски по цилиндрам (A1…) отдельно разбирает [readMisfires].
+  Future<MonitorTestsReport?> readMonitorTests({
+    int tMs = 0,
+    int maxMids = 40,
+  }) async {
+    if (!(_info?.isCan ?? true)) return null;
+    final mids = <int>{};
+    try {
+      for (var base = 0x00; base <= 0xE0; base += 0x20) {
+        final mask = mode06Record(
+          await send('06${hexByte(base)}'),
+          hexByte(base),
+        );
+        if (mask == null || mask.length < 6) break;
+        mids.addAll(decodeSupportedPids(base, mask.sublist(2, 6)));
+        if (!mids.contains(base + 0x20)) break;
+      }
+    } on ElmException {
+      if (mids.isEmpty) return null;
+    }
+    final tests = <MonitorTest>[];
+    final wanted = [
+      for (final mid in mids.toList()..sort())
+        if (mid % 0x20 != 0 && (mid < misfireGeneralMid || mid > 0xAD)) mid,
+    ];
+    for (final mid in wanted.take(maxMids)) {
+      try {
+        final msg = mode06Record(await send('06${hexByte(mid)}'), hexByte(mid));
+        if (msg != null) tests.addAll(parseMode06(msg));
+      } on ElmException {
+        // Этот тест блок не отдал — следующий.
+      }
+    }
+    return MonitorTestsReport(tMs: tMs, tests: tests);
   }
 
   /// Коды неисправностей: 0x03 — сохранённые, 0x07 — ожидающие, 0x0A — постоянные.

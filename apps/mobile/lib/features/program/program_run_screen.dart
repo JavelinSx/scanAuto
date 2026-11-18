@@ -7,6 +7,7 @@ import 'package:scan_core/scan_core.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../live/scan_controller.dart';
+import '../live/stale_banner.dart';
 
 /// Ход программы: крупно, чтобы читалось с держателя на панели.
 class ProgramRunScreen extends ConsumerStatefulWidget {
@@ -77,13 +78,25 @@ class _ProgramRunScreenState extends ConsumerState<ProgramRunScreen> {
       ),
       body: switch (scan.phase) {
         ScanPhase.disconnected || ScanPhase.connecting => Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const CircularProgressIndicator(),
-              const SizedBox(height: 16),
-              Text(scan.status ?? ''),
-            ],
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text(scan.status ?? '', textAlign: TextAlign.center),
+                // Переподключение посреди программы: можно не ждать,
+                // а закончить и разобрать то, что уже записано.
+                if (scan.recording != null) ...[
+                  const SizedBox(height: 24),
+                  OutlinedButton(
+                    onPressed: _confirmStop,
+                    child: const Text('Остановить'),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
         ScanPhase.live => _Running(scan: scan, onStop: _confirmStop),
@@ -114,7 +127,7 @@ class _Running extends ConsumerWidget {
     String value(String key) {
       final pid = pidsByKey[key]!;
       final v = scan.latest[key];
-      return v == null ? '—' : '${v.toStringAsFixed(pid.decimals)} ${pid.unit}';
+      return pid.display(v);
     }
 
     final shown = switch (stage.kind) {
@@ -184,6 +197,10 @@ class _Running extends ConsumerWidget {
               child: Text(hint, style: text.titleLarge),
             ),
           const SizedBox(height: 24),
+          if (scan.staleSeconds > 0) ...[
+            StaleBanner(seconds: scan.staleSeconds),
+            const SizedBox(height: 12),
+          ],
           Row(
             children: [
               for (final key in shown)
@@ -191,7 +208,14 @@ class _Running extends ConsumerWidget {
                   child: Column(
                     children: [
                       Text(pidsByKey[key]!.name, style: text.bodyMedium),
-                      Text(value(key), style: text.headlineMedium),
+                      Text(
+                        value(key),
+                        style: text.headlineMedium?.copyWith(
+                          color: scan.staleSeconds > 0
+                              ? Theme.of(context).disabledColor
+                              : null,
+                        ),
+                      ),
                     ],
                   ),
                 ),

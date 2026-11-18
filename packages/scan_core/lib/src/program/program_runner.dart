@@ -54,12 +54,17 @@ class ProgramRunner {
   double? _startCoolant;
   bool _finished = false;
 
+  /// [skip] начал новый этап, а [update] об этом ещё не сообщил.
+  bool _skipped = false;
+
   bool get finished => _finished;
   StageSpec get stage => program.stages[min(_stage, program.stages.length - 1)];
 
   ProgramStatus update(int nowMs) {
     if (_finished) return _status(nowMs, 0, 1, false, false);
-    var stageChanged = false;
+    // Этап сменил водитель: вызывающий должен сменить опрос, как при смене сам.
+    var stageChanged = _skipped;
+    _skipped = false;
     if (_stageStartMs == null) {
       _begin(nowMs);
       stageChanged = true;
@@ -92,7 +97,10 @@ class ProgramRunner {
   void skip(int nowMs) {
     if (_finished || _stageStartMs == null) return;
     _close(nowMs, completed: false, note: 'закончен водителем досрочно');
-    if (!_finished) _begin(nowMs);
+    if (!_finished) {
+      _begin(nowMs);
+      _skipped = true;
+    }
   }
 
   /// Прервать всю программу: текущий отрезок закрывается как есть.

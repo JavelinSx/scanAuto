@@ -72,6 +72,7 @@ final class ScanState {
     this.revision = 0,
     this.program,
     this.programStatus,
+    this.staleSeconds = 0,
   });
 
   final ScanPhase phase;
@@ -95,6 +96,10 @@ final class ScanState {
   final DiagnosticProgram? program;
   final ProgramStatus? programStatus;
 
+  /// Сколько секунд от адаптера нет ни одного замера (0 — данные идут).
+  /// Значения в [latest] тогда устаревшие, и экран должен это показать.
+  final int staleSeconds;
+
   ScanState copyWith({
     ScanPhase? phase,
     String? error,
@@ -102,6 +107,7 @@ final class ScanState {
     Map<String, double>? latest,
     int? revision,
     ProgramStatus? programStatus,
+    int? staleSeconds,
   }) => ScanState(
     phase: phase ?? this.phase,
     target: target,
@@ -116,6 +122,7 @@ final class ScanState {
     revision: revision ?? this.revision,
     program: program,
     programStatus: programStatus ?? this.programStatus,
+    staleSeconds: staleSeconds ?? this.staleSeconds,
   );
 }
 
@@ -131,6 +138,16 @@ class ScanController extends Notifier<ScanState> {
   /// Сколько живых данных держим в памяти, пока записи не хранятся в базе (этап 2).
   /// Около 15 замеров в секунду — за 2 часа ~100 тыс. точек, единицы мегабайт.
   static const liveWindow = Duration(hours: 2);
+
+  /// Столько раз подряд переподключаемся сами, прежде чем показать экран обрыва.
+  static const maxAutoReconnects = 3;
+
+  /// Пауза перед автоматическим переподключением: адаптеру нужно закрыть сокет.
+  @visibleForTesting
+  static Duration autoReconnectDelay = const Duration(seconds: 2);
+
+  /// С этого порога экран показывает, что данные не идут.
+  static const staleAfterSeconds = 3;
 
   Elm327? _elm;
   StreamSubscription<Sample>? _samples;
@@ -148,9 +165,15 @@ class ScanController extends Notifier<ScanState> {
   ProgramRunner? _runner;
   int _runIndex = 0;
 
-  /// Блок данных производителя (`21 01`), найденный разведкой: его ответы пишутся
-  /// в запись сырыми, расшифровка — по журналам. null — блок не отвечает.
-  String? _dataBlock;
+  /// Автоматические переподключения подряд; замер от адаптера обнуляет счёт.
+  int _autoReconnects = 0;
+
+  /// Идёт [_finish]: конец сеанса читается один раз.
+  bool _finishing = false;
+
+  /// Запросы данных производителя (`21 01`, `22 00 01`), на которые блок ответил
+  /// при разведке: их ответы пишутся в запись сырыми, расшифровка — по журналам.
+  List<String> _dataBlocks = const [];
   int _loggedSegments = 0;
   int _lastSnapshotMs = 0;
   int _lastSnapshotSamples = 0;
@@ -211,7 +234,8 @@ class ScanController extends Notifier<ScanState> {
     _recording = null;
     _runner = null;
     _runIndex = 0;
-    _dataBlock = null;
+    _autoReconnects = 0;
+    _dataBlocks = const [];
     _loggedSegments = 0;
     _lastSnapshotMs = 0;
     _lastSnapshotSamples = 0;
@@ -247,6 +271,11 @@ class ScanController extends Notifier<ScanState> {
   /// Переподключиться к тому же адаптеру после обрыва. Запись и программа
   /// продолжаются; время без связи этапы не засчитывают.
   Future<void> reconnect() async {
+    _autoReconnects = 0;
+    await _reconnect();
+  }
+
+  Future<void> _reconnect() async {
     if (_target == null) return;
     final generation = ++_generation;
     await _teardown();
@@ -257,9 +286,12 @@ class ScanController extends Notifier<ScanState> {
   bool get canResume => _recording != null && _runner?.finished != true;
 
   Future<void> _open(int generation) async {
+    _finishing = false;
     final target = _target!;
     final program = _program;
     final resume = _recording != null;
+    // VIN при продолжении не перечитываем: берём из прошлого подключения.
+    final resumedVin = resume ? state.vin : null;
     void status(String text) {
       _log.write('status', text);
       if (_isCurrent(generation)) {
@@ -270,6 +302,8 @@ class ScanController extends Notifier<ScanState> {
           program: program,
           recording: _recording,
           programStatus: resume ? state.programStatus : null,
+          vin: resumedVin,
+          dtcs: resume ? state.dtcs : const [],
         );
       }
     }
@@ -340,7 +374,7 @@ class ScanController extends Notifier<ScanState> {
         }
       }
 
-      final vin = resume ? state.vin : await elm.readVin();
+      final vin = resume ? resumedVin : await elm.readVin();
       final dtcs = await tolerant('коды', elm.readDtcs, const <String>[]);
       final pending = await tolerant(
         'ожидающие коды',
@@ -377,7 +411,11 @@ class ScanController extends Notifier<ScanState> {
       }
       final runner = _runner;
       // Пропуски по цилиндрам на старте — чтобы в конце было с чем сравнить.
-      if (!resume) await _readMisfires(elm, recording, 'начало');
+      if (!resume) {
+        await _readMisfires(elm, recording, 'начало');
+        status('Готовность самопроверок и бортовые тесты…');
+        await _readChecks(elm, recording, 'начало');
+      }
       DateTime now() => recording.startedAt.add(_elapsed());
 
       state = ScanState(
@@ -401,7 +439,7 @@ class ScanController extends Notifier<ScanState> {
         pids,
         focus: runner?.stage.runs[_runIndex].fastKeys ?? LiveSampler.fastKeys,
         now: now,
-        rawCommands: [?_dataBlock],
+        rawCommands: _dataBlocks,
         rawHeader: '7E0',
         onRaw: recording.addRaw,
       );
@@ -425,6 +463,7 @@ class ScanController extends Notifier<ScanState> {
           );
         }
         _lastSampleWall = wall;
+        _autoReconnects = 0;
         recording.add(s.key, s.at, s.value);
         _latest[s.key] = s.value;
         _dirty = true;
@@ -455,13 +494,15 @@ class ScanController extends Notifier<ScanState> {
         }
         _logStages();
         _logSnapshot(recording);
-        if (!_dirty && status == null) return;
+        final stale = _staleSeconds();
+        if (!_dirty && status == null && stale == state.staleSeconds) return;
         _dirty = false;
         if (runner == null) recording.keepLast(liveWindow);
         state = state.copyWith(
           latest: Map.unmodifiable(_latest),
           revision: state.revision + 1,
           programStatus: status,
+          staleSeconds: stale,
         );
         if (status?.finished ?? false) unawaited(_finish(generation));
       });
@@ -521,6 +562,15 @@ class ScanController extends Notifier<ScanState> {
     );
   }
 
+  /// Секунды без замеров по часам телефона; меньше порога — 0, чтобы не
+  /// перерисовывать экран каждую секунду, пока всё в порядке.
+  int _staleSeconds() {
+    final last = _lastSampleWall;
+    if (last == null) return 0;
+    final seconds = DateTime.now().difference(last).inSeconds;
+    return seconds < staleAfterSeconds ? 0 : seconds;
+  }
+
   /// Водитель закончил текущий этап раньше.
   void skipStage() {
     _log.write('program', 'этап закончен водителем');
@@ -533,7 +583,18 @@ class ScanController extends Notifier<ScanState> {
     _log.write('program', 'остановлено водителем');
     _runner?.abort(_nowMs());
     _logStages();
-    await _finish(_generation);
+    if (state.phase == ScanPhase.live) {
+      await _finish(_generation);
+      return;
+    }
+    // Идёт переподключение: бросаем его, записанное остаётся для разбора.
+    _generation++;
+    await _teardown();
+    await _saveRecording();
+    if (ref.mounted && _recording != null) {
+      _log.write('session', 'конец, этапы: ${_segmentsSummary()}');
+      state = state.copyWith(phase: ScanPhase.finished);
+    }
   }
 
   /// После обрыва — не переподключаться, а разбирать то, что есть.
@@ -548,12 +609,19 @@ class ScanController extends Notifier<ScanState> {
 
   Future<void> _finish(int generation) async {
     if (!_isCurrent(generation) || state.phase != ScanPhase.live) return;
+    // Таймер перерисовки видит «программа закончена» каждые 250 мс, а чтение
+    // пропусков и бортовых тестов в конце идёт секунды — второй вызов не нужен.
+    if (_finishing) return;
+    _finishing = true;
     // Отключаем адаптер сразу: после него (и снятия привязки к Wi-Fi)
     // у приложения снова есть интернет для запроса к модели.
     // Пропуски за поездку — пока адаптер ещё подключён.
     final elm = _elm;
     final rec = _recording;
-    if (elm != null && rec != null) await _readMisfires(elm, rec, 'конец');
+    if (elm != null && rec != null) {
+      await _readMisfires(elm, rec, 'конец');
+      await _readChecks(elm, rec, 'конец');
+    }
     if (!_isCurrent(generation)) return;
     state = state.copyWith(phase: ScanPhase.finished);
     _logStages();
@@ -567,6 +635,31 @@ class ScanController extends Notifier<ScanState> {
     _log.write('error', 'обрыв: ${describeScanError(error)} ($error)');
     await _teardown();
     if (!_isCurrent(generation)) return;
+    if (_canAutoReconnect(error)) {
+      _autoReconnects++;
+      _log.write(
+        'session',
+        'автопереподключение $_autoReconnects из $maxAutoReconnects',
+      );
+      state = ScanState(
+        phase: ScanPhase.connecting,
+        target: _target,
+        status:
+            'Связь с адаптером пропала — переподключаюсь, '
+            'попытка $_autoReconnects из $maxAutoReconnects…',
+        recording: state.recording,
+        program: state.program,
+        programStatus: state.programStatus,
+        vin: state.vin,
+        dtcs: state.dtcs,
+        pendingDtcs: state.pendingDtcs,
+        info: state.info,
+      );
+      await Future<void>.delayed(autoReconnectDelay);
+      if (!_isCurrent(generation)) return;
+      await _reconnect();
+      return;
+    }
     // Запись до обрыва сохраняется: можно переподключиться и продолжить
     // или разобрать то, что есть.
     state = ScanState(
@@ -582,6 +675,21 @@ class ScanController extends Notifier<ScanState> {
       info: state.info,
     );
   }
+
+  /// Связь пропала посреди записи (адаптер замолчал, Bluetooth оборвался,
+  /// приложение замораживали в фоне) — пробуем вернуться сами. Если машина
+  /// не отвечает или нет разрешений, переподключение не поможет.
+  bool _canAutoReconnect(Object error) =>
+      _target is! SimulatorTarget &&
+      canResume &&
+      _autoReconnects < maxAutoReconnects &&
+      switch (error) {
+        ElmTimeoutException() || ElmDisconnectedException() => true,
+        BluetoothException(:final code) =>
+          code != 'permission_denied' && code != 'bluetooth_off',
+        SocketException() => true,
+        _ => false,
+      };
 
   String _segmentsSummary() => [
     for (final s in _recording?.segments ?? const <RecordingSegment>[])
@@ -618,12 +726,13 @@ class ScanController extends Notifier<ScanState> {
                   : ' [отказ]'}',
         );
       }
-      _dataBlock = probe.dataBlockCommand;
+      _dataBlocks = List.unmodifiable(probe.dataBlockCommands);
       _log.write(
         'vaz',
-        _dataBlock == null
+        _dataBlocks.isEmpty
             ? 'блок данных производителя не отвечает — пишем только стандартные PID'
-            : 'блок данных $_dataBlock пишется в запись сырым раз в несколько секунд',
+            : 'блок данных ${_dataBlocks.join(', ')} пишется в запись сырым '
+                  'раз в несколько секунд',
       );
     } on Object catch (e) {
       _log.write('vaz', 'разведка прервана: $e');
@@ -657,6 +766,39 @@ class ScanController extends Notifier<ScanState> {
       );
     } on Object catch (e) {
       _log.write('misfire', '$when: не прочитаны ($e)');
+    }
+  }
+
+  /// Готовность самопроверок (PID 01) и бортовые тесты режима 06 (лямбды,
+  /// катализатор…): в запись и журнал. Не ответил блок — строка в журнале.
+  Future<void> _readChecks(Elm327 elm, Recording rec, String when) async {
+    try {
+      final readiness = await elm
+          .readReadiness(tMs: _nowMs())
+          .timeout(const Duration(seconds: 5));
+      if (readiness == null) {
+        _log.write('readiness', '$when: блок не ответил на 0101');
+      } else {
+        rec.readiness.add(readiness);
+        _log.write('readiness', '$when: ${readiness.summary}');
+      }
+    } on Object catch (e) {
+      _log.write('readiness', '$when: не прочитана ($e)');
+    }
+    try {
+      final tests = await elm
+          .readMonitorTests(tMs: _nowMs())
+          .timeout(const Duration(seconds: 20));
+      if (tests == null || tests.tests.isEmpty) {
+        _log.write('mode06', '$when: бортовых тестов нет');
+        return;
+      }
+      rec.monitorTests.add(tests);
+      for (final line in tests.lines) {
+        _log.write('mode06', '$when: $line');
+      }
+    } on Object catch (e) {
+      _log.write('mode06', '$when: не прочитаны ($e)');
     }
   }
 

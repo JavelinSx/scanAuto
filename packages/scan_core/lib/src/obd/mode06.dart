@@ -27,8 +27,169 @@ final class MonitorTest {
   final int min;
   final int max;
 
-  /// Вне пределов — тест не пройден.
-  bool get failed => value < min || value > max;
+  /// Вне пределов — тест не пройден. У знаковых единиц (UASID 0x81…0xFE)
+  /// значения и пределы сравниваются со знаком.
+  bool get failed {
+    final v = _signed(value), lo = _signed(min), hi = _signed(max);
+    return v < lo || v > hi;
+  }
+
+  bool get _isSigned => uasid >= 0x81 && uasid <= 0xFE;
+  int _signed(int raw) => _isSigned && raw >= 0x8000 ? raw - 0x10000 : raw;
+
+  /// Значение в физических единицах, если масштаб [uasid] известен.
+  double? get scaled => _scale(_signed(value));
+  double? get scaledMin => _scale(_signed(min));
+  double? get scaledMax => _scale(_signed(max));
+  String? get unit => _uasids[_isSigned ? uasid - 0x80 : uasid]?.$2;
+
+  double? _scale(int raw) {
+    final u = _uasids[_isSigned ? uasid - 0x80 : uasid];
+    return u == null ? null : raw * u.$1;
+  }
+
+  /// Масштаб и единицы самых частых UASID (J1979, приложение E);
+  /// у остальных в пакет уходит сырое значение.
+  static const _uasids = <int, (double, String)>{
+    0x01: (1, ''),
+    0x02: (0.1, ''),
+    0x03: (0.01, ''),
+    0x04: (0.001, ''),
+    0x0A: (0.000122, 'В'),
+    0x0B: (0.001, 'В'),
+    0x0C: (0.01, 'В'),
+    0x10: (1, 'мс'),
+    0x11: (100, 'мс'),
+    0x12: (1, 'с'),
+    0x24: (1, 'шт'),
+  };
+
+  Map<String, Object?> toJson() => {
+    'mid': mid,
+    'tid': tid,
+    'uasid': uasid,
+    'value': value,
+    'min': min,
+    'max': max,
+  };
+
+  factory MonitorTest.fromJson(Map<String, Object?> json) => MonitorTest(
+    mid: (json['mid']! as num).toInt(),
+    tid: (json['tid']! as num).toInt(),
+    uasid: (json['uasid']! as num).toInt(),
+    value: (json['value']! as num).toInt(),
+    min: (json['min']! as num).toInt(),
+    max: (json['max']! as num).toInt(),
+  );
+
+  /// Для ИИ: что за тест, значение с единицами, пределы, пройден ли.
+  Map<String, Object?> describe() {
+    num? round(double? v) =>
+        v == null ? null : (v * 10000).roundToDouble() / 10000;
+    return {
+      'monitor': monitorTitle(mid),
+      'test': testTitle(mid, tid),
+      'mid': mid.toRadixString(16).padLeft(2, '0').toUpperCase(),
+      'tid': tid.toRadixString(16).padLeft(2, '0').toUpperCase(),
+      if (scaled != null) ...{
+        'value': round(scaled),
+        'min': round(scaledMin),
+        'max': round(scaledMax),
+        'unit': unit,
+      } else ...{
+        'raw': value,
+        'raw_min': min,
+        'raw_max': max,
+        'uasid': uasid,
+      },
+      'failed': failed,
+    };
+  }
+}
+
+/// Название группы тестов по OBDMID (J1979).
+String monitorTitle(int mid) {
+  if (mid >= 0x01 && mid <= 0x08) {
+    return 'лямбда-зонд ряд ${(mid - 1) ~/ 4 + 1} датчик ${(mid - 1) % 4 + 1}';
+  }
+  if (mid >= 0x21 && mid <= 0x24) return 'катализатор ряд ${mid - 0x20}';
+  if (mid >= 0x31 && mid <= 0x38) return 'рециркуляция выхлопа (EGR)';
+  if (mid >= 0x39 && mid <= 0x3D) return 'улавливание паров бензина (EVAP)';
+  if (mid >= 0x41 && mid <= 0x48) {
+    return 'подогрев лямбда-зонда ряд ${(mid - 0x41) ~/ 4 + 1} '
+        'датчик ${(mid - 0x41) % 4 + 1}';
+  }
+  if (mid >= 0x71 && mid <= 0x74) return 'вторичный воздух';
+  if (mid >= 0x81 && mid <= 0x84) return 'топливная система ряд ${mid - 0x80}';
+  if (mid == misfireGeneralMid) return 'пропуски воспламенения, все цилиндры';
+  if (mid > misfireGeneralMid && mid <= 0xAD) {
+    return 'пропуски воспламенения, цилиндр ${mid - misfireGeneralMid}';
+  }
+  return 'тест MID ${mid.toRadixString(16).toUpperCase()}';
+}
+
+/// Стандартные TID лямбда-зондов (J1979; у производителя смысл может отличаться,
+/// TID 80 и выше — свои у каждого производителя).
+String testTitle(int mid, int tid) {
+  if (mid >= 0x01 && mid <= 0x08) {
+    final title = switch (tid) {
+      0x01 => 'порог переключения богато→бедно',
+      0x02 => 'порог переключения бедно→богато',
+      0x03 => 'нижнее напряжение для расчёта времени переключения',
+      0x04 => 'верхнее напряжение для расчёта времени переключения',
+      0x05 => 'время переключения богато→бедно',
+      0x06 => 'время переключения бедно→богато',
+      0x07 => 'минимальное напряжение зонда',
+      0x08 => 'максимальное напряжение зонда',
+      0x09 => 'время между переключениями',
+      0x0A => 'период переключения',
+      _ => null,
+    };
+    if (title != null) return title;
+  }
+  if (mid >= misfireGeneralMid && mid <= 0xAD) {
+    if (tid == misfireEwmaTid) return 'среднее за 10 поездок';
+    if (tid == misfireCurrentTid) return 'за текущую поездку';
+  }
+  return tid >= 0x80
+      ? 'тест производителя ${tid.toRadixString(16).toUpperCase()}'
+      : 'тест ${tid.toRadixString(16).toUpperCase()}';
+}
+
+/// Все бортовые тесты, прочитанные разом (в начале и в конце сеанса).
+final class MonitorTestsReport {
+  const MonitorTestsReport({required this.tMs, required this.tests});
+
+  /// Миллисекунды от начала записи.
+  final int tMs;
+  final List<MonitorTest> tests;
+
+  Map<String, Object?> toJson() => {
+    't': tMs,
+    'tests': [for (final t in tests) t.toJson()],
+  };
+
+  factory MonitorTestsReport.fromJson(Map<String, Object?> json) =>
+      MonitorTestsReport(
+        tMs: (json['t'] as num? ?? 0).toInt(),
+        tests: [
+          for (final t in (json['tests'] as List? ?? const []))
+            MonitorTest.fromJson((t as Map).cast<String, Object?>()),
+        ],
+      );
+
+  /// Для журнала: «лямбда-зонд ряд 1 датчик 1 / время переключения богато→бедно
+  /// = 68 мс (0…100)».
+  List<String> get lines => [
+    for (final t in tests)
+      '${monitorTitle(t.mid)} / ${testTitle(t.mid, t.tid)} = '
+          '${t.scaled == null ? 'сырое ${t.value} (UASID ${t.uasid.toRadixString(16)})' : '${_fmt(t.scaled!)} ${t.unit}'.trim()} '
+          '(${t.scaled == null ? '${t.min}…${t.max}' : '${_fmt(t.scaledMin!)}…${_fmt(t.scaledMax!)}'})'
+          '${t.failed ? ' НЕ ПРОЙДЕН' : ''}',
+  ];
+
+  static String _fmt(double v) =>
+      v == v.roundToDouble() ? v.toInt().toString() : v.toStringAsFixed(3);
 }
 
 /// Записи из ответа режима 06 на CAN. Неполная запись в конце отбрасывается.

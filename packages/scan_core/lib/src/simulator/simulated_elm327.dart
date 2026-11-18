@@ -23,6 +23,9 @@ final class SimulatedElm327 implements ObdTransport {
     int canErrors = 0,
     this._err94 = false,
     this._noData0120 = 0,
+    this.responseCount = true,
+    this.multiPid = true,
+    this.dataService = 0x21,
   }) : _canErrorsLeft = canErrors,
        _clock = clock ?? _stopwatchClock(),
        _engine = SimEngine(scenario, seed: seed, ambient: ambient),
@@ -52,6 +55,16 @@ final class SimulatedElm327 implements ObdTransport {
   /// Сколько раз группа PID 0120 ответит NO DATA, хотя 0100 уже ответил —
   /// как занятый блок на неустойчивой шине (Гранта, 17.11).
   int _noData0120;
+
+  /// Понимает цифру числа ответов в конце запроса (`010C1`). Нет — «?», как клон.
+  final bool responseCount;
+
+  /// Блок отвечает на несколько PID в одном запросе. Нет — только на первый.
+  final bool multiPid;
+
+  /// Каким запросом блок отдаёт данные производителя по адресу 7E0:
+  /// 0x21 — KWP `21 01` (Январь), 0x22 — UDS `22 00 01` (Итэлма M74 CAN).
+  final int dataService;
 
   String _protocol = '0';
   String? _header;
@@ -191,6 +204,11 @@ final class SimulatedElm327 implements ObdTransport {
   double get _seconds => _clock().inMilliseconds / 1000;
 
   String _obd(String c) {
+    // Цифра числа ответов: нечётная длина, последняя цифра — сколько ждать.
+    // Блок у симулятора один, поэтому ответ тот же.
+    if (c.length.isOdd && c.length > 2 && responseCount) {
+      c = c.substring(0, c.length - 1);
+    }
     final bytes = parseHexBytes(c);
     if (bytes == null || bytes.isEmpty) return '?';
     switch (bytes[0]) {
@@ -200,6 +218,14 @@ final class SimulatedElm327 implements ObdTransport {
       case 0x01 when bytes.length == 2:
         final data = _engine.mode01(bytes[1], _seconds);
         return data == null ? 'NO DATA' : _message([0x41, bytes[1], ...data]);
+      // Несколько PID в одном запросе (CAN, до 6): один ответ со всеми.
+      case 0x01 when bytes.length > 2 && bytes.length <= 7 && _isCan:
+        final out = <int>[0x41];
+        for (final pid in multiPid ? bytes.skip(1) : bytes.skip(1).take(1)) {
+          final data = _engine.mode01(pid, _seconds);
+          if (data != null) out.addAll([pid, ...data]);
+        }
+        return out.length == 1 ? 'NO DATA' : _message(out);
       case 0x03 when !_isCan:
         // Старые протоколы: без числа кодов, по три кода на кадр, добито нулями.
         final codes = [for (final d in _dtcs) ...encodeDtc(d)];
@@ -225,7 +251,38 @@ final class SimulatedElm327 implements ObdTransport {
         return _message([0x44]);
       // Заглушка блока данных производителя для тестов разведки и сырой записи:
       // раскладка выдуманная (ОЖ+40, обороты/40), настоящая у ВАЗ — по журналам.
-      case 0x21 when bytes.length == 2 && bytes[1] == 0x01 && _header == '7E0':
+      // UDS 22 00 01, как у Итэлмы M74 CAN: многокадровый ответ. Раскладка
+      // выдуманная (напряжение ×10, ОЖ (t+48)/0.75 словом, обороты ×4 словом).
+      case 0x22
+          when bytes.length == 3 &&
+              bytes[1] == 0x00 &&
+              bytes[2] == 0x01 &&
+              _header == '7E0' &&
+              dataService == 0x22:
+        final coolant = ((_engine.value(0x05, _seconds)! + 48) / 0.75).round();
+        final rpm = (_engine.value(0x0C, _seconds)! * 4).round();
+        return _message([
+          0x62,
+          0x00,
+          0x01,
+          (_engine.value(0x42, _seconds)! * 10).round().clamp(0, 255),
+          coolant >> 8,
+          coolant & 0xFF,
+          rpm >> 8,
+          rpm & 0xFF,
+          0x00,
+          ((_engine.value(0x0E, _seconds)! + 64) * 2).round().clamp(0, 255),
+          0x00,
+          0x00,
+        ]);
+      case 0x22
+          when bytes.length == 3 && bytes[1] == 0x00 && dataService == 0x22:
+        return _message([0x7F, 0x22, 0x31]);
+      case 0x21
+          when bytes.length == 2 &&
+              bytes[1] == 0x01 &&
+              _header == '7E0' &&
+              dataService == 0x21:
         return _message([
           0x61,
           0x01,
@@ -237,6 +294,13 @@ final class SimulatedElm327 implements ObdTransport {
       // Режим 06: тесты пропусков воспламенения (MID A1 — все, A2…A5 — цилиндры).
       case 0x06 when bytes.length == 2 && _isCan:
         final mid = bytes[1];
+        // Цепочка масок до A0, как у блока с лямбдами, катализатором и подогревом.
+        if (_mode06Masks[mid] case final mids?) {
+          return _message([0x46, mid, ...encodeSupportedPids(mid, mids)]);
+        }
+        if (_mode06Tests(mid) case final records?) {
+          return _message([0x46, for (final r in records) ...r]);
+        }
         if (mid == 0xA0) {
           return _message([
             0x46,
@@ -281,6 +345,41 @@ final class SimulatedElm327 implements ObdTransport {
       default:
         return 'NO DATA';
     }
+  }
+
+  static const _mode06Masks = {
+    0x00: {0x01, 0x02, 0x20},
+    0x20: {0x21, 0x40},
+    0x40: {0x41, 0x60},
+    0x60: {0x80},
+    0x80: {0xA0},
+  };
+
+  /// Записи тестов: MID, TID, UASID, значение, мин, макс (по 2 байта).
+  List<List<int>>? _mode06Tests(int mid) {
+    List<int> record(int tid, int uasid, int value, int lo, int hi) => [
+      mid,
+      tid,
+      uasid,
+      value >> 8,
+      value & 0xFF,
+      lo >> 8,
+      lo & 0xFF,
+      hi >> 8,
+      hi & 0xFF,
+    ];
+    return switch (mid) {
+      // Передний зонд: порог 0.45 В (0.122 мВ на единицу), переключения в мс.
+      0x01 => [
+        record(0x01, 0x0A, 3689, 0, 0xFFFF),
+        record(0x05, 0x10, 70, 0, 100),
+        record(0x06, 0x10, 80, 0, 100),
+      ],
+      0x02 => [record(0x07, 0x0A, 820, 0, 3300)],
+      0x21 => [record(0x80, 0x01, 30, 0, 100)],
+      0x41 => [record(0x81, 0x10, 25, 0, 60)],
+      _ => null,
+    };
   }
 
   /// Ответ CAN без заголовков: до 7 байт — одной строкой, длиннее — как ISO-TP

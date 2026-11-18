@@ -19,10 +19,11 @@ final class ProbeResult {
 /// Разведка блока двигателя: какие запросы сверх стандартного OBD он понимает.
 ///
 /// Только чтение: идентификация (09, 1A, 22 F1xx), блок текущих данных
-/// производителя (21 01…03), результаты бортовых тестов (06), в том числе
-/// счётчики пропусков по цилиндрам. Ничего не записывается, режимы блока не
+/// производителя (KWP 21 01…03 и, как у Итэлмы M74 CAN, UDS 22 00 01…03),
+/// результаты бортовых тестов (06). Ничего не записывается, режимы блока не
 /// меняются, кроме стандартного диагностического сеанса по умолчанию (10 81) —
-/// и только если блок отказал в 21 01 «не в том сеансе».
+/// и только если блок отказал в данных «не в том сеансе». Сервисы управления
+/// (2F — вентилятор, муфта кондиционера и т. п.) не используются никогда.
 ///
 /// На CAN запросы идут по физическому адресу двигателя 7E0 (ответ с 7E8);
 /// в конце заголовок возвращается на функциональный 7DF для обычного опроса.
@@ -31,9 +32,25 @@ class EcuProbe {
 
   final Elm327 _elm;
 
-  /// Блок текущих данных производителя, если он отвечает: '2101'.
-  /// Его ответы стоит писать в запись сырыми — расшифровка по журналам.
-  String? dataBlockCommand;
+  /// Запросы данных производителя, на которые блок ответил: '2101', '220001'.
+  /// Их ответы стоит писать в запись сырыми — расшифровка по журналам.
+  final List<String> dataBlockCommands = [];
+
+  /// Первый из [dataBlockCommands] — для совместимости.
+  String? get dataBlockCommand =>
+      dataBlockCommands.isEmpty ? null : dataBlockCommands.first;
+
+  /// Блоки данных производителя: KWP (Январь, M7.9.7…) и UDS-идентификаторы
+  /// Итэлмы M74 CAN — на Гранте с ним 22 00 01 отдаёт многокадровый ответ
+  /// (напряжение, температура, обороты…, по форумам владельцев).
+  static const dataBlocks = [
+    ('2101', 'Данные производителя 21 01'),
+    ('2102', 'Данные производителя 21 02'),
+    ('2103', 'Данные производителя 21 03'),
+    ('220001', 'Данные ВАЗ 22 00 01'),
+    ('220002', 'Данные ВАЗ 22 00 02'),
+    ('220003', 'Данные ВАЗ 22 00 03'),
+  ];
 
   Future<List<ProbeResult>> run({required bool isCan}) async {
     final results = <ProbeResult>[];
@@ -68,23 +85,28 @@ class EcuProbe {
       await ask('UDS $title', '22$did');
     }
 
-    // Блок текущих данных ВАЗ (KWP 21 xx).
-    var block = await ask('Данные производителя 21 01', '2101');
-    if (block.positive == false && _needsSession(block.raw)) {
-      await ask('Сеанс по умолчанию', '1081');
-      block = await ask('Данные производителя 21 01 после сеанса', '2101');
+    // Блоки текущих данных ВАЗ: KWP 21 xx и UDS 22 00 xx.
+    var sessionTried = false;
+    for (final (command, title) in dataBlocks) {
+      var block = await ask(title, command);
+      if (block.positive == false &&
+          !sessionTried &&
+          _needsSession(block.raw, command)) {
+        sessionTried = true;
+        await ask('Сеанс по умолчанию', '1081');
+        block = await ask('$title после сеанса', command);
+      }
+      if (block.positive == true) dataBlockCommands.add(command);
     }
-    if (block.positive == true) dataBlockCommand = '2101';
-    await ask('Данные производителя 21 02', '2102');
-    await ask('Данные производителя 21 03', '2103');
     if (isCan) await _elm.send('ATSH7DF');
     return results;
   }
 
-  /// 7F 21 7F/80 — «сервис не поддерживается в текущем сеансе».
-  static bool _needsSession(String raw) {
+  /// 7F <сервис> 7F/80 — «сервис не поддерживается в текущем сеансе».
+  static bool _needsSession(String raw, String command) {
     final clean = raw.replaceAll(RegExp(r'\s'), '').toUpperCase();
-    return clean.contains('7F217F') || clean.contains('7F2180');
+    final service = command.substring(0, 2).toUpperCase();
+    return clean.contains('7F${service}7F') || clean.contains('7F${service}80');
   }
 
   Future<ProbeResult> _ask(String title, String command) async {

@@ -8,6 +8,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'pid_chart.dart';
 import 'scan_controller.dart';
+import 'stale_banner.dart';
 
 class LiveScreen extends ConsumerStatefulWidget {
   const LiveScreen({super.key});
@@ -163,6 +164,10 @@ class _Live extends StatelessWidget {
           style: text.bodySmall,
         ),
         const SizedBox(height: 12),
+        if (scan.staleSeconds > 0) ...[
+          StaleBanner(seconds: scan.staleSeconds),
+          const SizedBox(height: 12),
+        ],
         _DtcCard(dtcs: scan.dtcs, pending: scan.pendingDtcs),
         const SizedBox(height: 12),
         Card(
@@ -212,8 +217,7 @@ class _Live extends StatelessWidget {
   }
 }
 
-String _format(Pid pid, double? value) =>
-    value == null ? '—' : '${value.toStringAsFixed(pid.decimals)} ${pid.unit}';
+String _format(Pid pid, double? value) => pid.display(value);
 
 class _PidTile extends StatelessWidget {
   const _PidTile({

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:scan_core/scan_core.dart';
 import 'package:test/test.dart';
 
@@ -347,6 +349,27 @@ void main() {
     await elm.close();
   });
 
+  test('зависшая отправка — тайм-аут, а не вечное ожидание', () async {
+    // Гранта, 18.11: приложение заморозили в фоне посреди записи в Bluetooth,
+    // запись не вернулась, и опрос встал навсегда — тайм-аут ждал только ответа.
+    final transport = _HangingTransport(
+      SimulatedElm327(latency: Duration.zero),
+    );
+    final lines = <String>[];
+    final elm = Elm327(transport, log: lines.add);
+    await elm.initialize();
+    transport.hang = true;
+    await expectLater(
+      elm.send('010C', timeout: const Duration(milliseconds: 100)),
+      throwsA(isA<ElmTimeoutException>()),
+    );
+    expect(lines, contains('TIMEOUT 010C (100 мс)'));
+    // Отправка снова проходит — опрос продолжается.
+    transport.hang = false;
+    expect(await elm.readPid(pidsByKey['rpm']!), isNotNull);
+    await elm.close();
+  });
+
   test('ключ протокола туда и обратно', () {
     expect(ProtocolAttempt.fromKey('6')?.key, '6');
     expect(ProtocolAttempt.fromKey('5:8110F1')?.header, '8110F1');
@@ -364,4 +387,23 @@ void main() {
     await server.close();
     expect(server.connections, 1);
   });
+}
+
+/// Транспорт, у которого запись может зависнуть навсегда, как Bluetooth
+/// после заморозки приложения.
+class _HangingTransport implements ObdTransport {
+  _HangingTransport(this._inner);
+
+  final ObdTransport _inner;
+  bool hang = false;
+
+  @override
+  Stream<List<int>> get input => _inner.input;
+
+  @override
+  Future<void> write(List<int> bytes) =>
+      hang ? Completer<void>().future : _inner.write(bytes);
+
+  @override
+  Future<void> close() => _inner.close();
 }

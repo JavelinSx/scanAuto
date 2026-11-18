@@ -12,6 +12,7 @@ final class Pid {
     required this.min,
     required this.max,
     this.decimals = 0,
+    this.text,
   });
 
   final int code;
@@ -28,11 +29,38 @@ final class Pid {
   final double max;
   final int decimals;
 
+  /// Значение словами, если число само по себе ничего не говорит (код состояния).
+  final String Function(double value)? text;
+
   String get command => '01${hexByte(code)}';
 
   double? decode(List<int> data) =>
       data.length < byteCount ? null : _formula(data);
+
+  /// Для экрана: «850 об/мин» или, у кодов состояния, «замкнутый контур».
+  String display(double? value) => value == null
+      ? '—'
+      : text?.call(value) ??
+            '${value.toStringAsFixed(decimals)}${unit.isEmpty ? '' : ' $unit'}';
 }
+
+/// Состояние топливной системы (PID 03, первый байт): по лямбде блок работает
+/// только в замкнутом контуре — коррекции смеси имеют смысл только в нём.
+const fuelSystemOpenCold = 1;
+const fuelSystemClosed = 2;
+const fuelSystemOpenLoad = 4;
+const fuelSystemOpenFault = 8;
+const fuelSystemClosedFault = 16;
+
+String fuelSystemText(double value) => switch (value.round()) {
+  fuelSystemOpenCold => 'открытый контур: прогрев',
+  fuelSystemClosed => 'замкнутый контур',
+  fuelSystemOpenLoad => 'открытый контур: нагрузка или сброс газа',
+  fuelSystemOpenFault => 'открытый контур: неисправность',
+  fuelSystemClosedFault => 'замкнутый контур, неисправен датчик',
+  0 => 'нет данных',
+  final v => 'код $v',
+};
 
 double _a(List<int> b) => b[0].toDouble();
 double _ab(List<int> b) => (b[0] * 256 + b[1]).toDouble();
@@ -172,6 +200,18 @@ final List<Pid> standardPids = [
     max: 50,
   ),
   Pid(0x1F, 'runtime', 'С момента запуска', 'с', 2, _ab, min: 0, max: 3600),
+  // Два байта: системы 1 и 2; у четырёх цилиндров вторая не используется.
+  Pid(
+    0x03,
+    'fuel_sys',
+    'Топливная система',
+    '',
+    2,
+    _a,
+    min: 0,
+    max: 16,
+    text: fuelSystemText,
+  ),
 ];
 
 final Map<String, Pid> pidsByKey = {for (final p in standardPids) p.key: p};

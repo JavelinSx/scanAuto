@@ -93,6 +93,7 @@ final class DiagnosticProgram {
         minDuration: const Duration(minutes: 3),
         maxDuration: Duration(minutes: winter ? 20 : 12),
         runs: const [
+          // fuel_sys — когда блок перешёл в замкнутый контур по лямбде.
           StageRun('Холодный пуск', {
             'rpm',
             'coolant',
@@ -100,6 +101,7 @@ final class DiagnosticProgram {
             'o2_b1s1',
             'maf',
             'timing',
+            'fuel_sys',
           }),
         ],
       ),
@@ -121,6 +123,7 @@ final class DiagnosticProgram {
             'stft1',
             'ltft1',
             'o2_b1s1',
+            'fuel_sys',
           }, duration: Duration(minutes: 5)),
           StageRun('Зажигание и впуск', {
             'rpm',

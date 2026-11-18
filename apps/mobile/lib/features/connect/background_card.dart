@@ -4,14 +4,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/background_session.dart';
 
 /// Предупреждение, если Android может остановить запись в фоне: ограничение батареи
-/// не снято. Без него прошивки замораживают приложение, стоит его свернуть.
+/// не снято или уведомления выключены. Без этого прошивки замораживают приложение,
+/// стоит его свернуть.
 class BackgroundCard extends ConsumerWidget {
   const BackgroundCard({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(backgroundStatusProvider).value;
-    if (status == null || status.batteryExempt) return const SizedBox.shrink();
+    if (status == null || (status.batteryExempt && status.notifications)) {
+      return const SizedBox.shrink();
+    }
     final background = ref.read(backgroundSessionProvider);
     final hint = backgroundHint(status.manufacturer);
     final scheme = Theme.of(context).colorScheme;
@@ -29,9 +32,17 @@ class BackgroundCard extends ConsumerWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              'Android ограничивает приложение ради батареи: стоит его свернуть '
-              'или погасить экран — опрос встаёт. Разрешите работу в фоне.'
-              '${hint == null ? '' : '\n\n$hint'}',
+              [
+                if (!status.batteryExempt)
+                  'Android ограничивает приложение ради батареи: стоит его свернуть '
+                      'или погасить экран — опрос встаёт. Разрешите работу в фоне.',
+                if (!status.notifications)
+                  'Уведомления scanAuto выключены. Без значка записи часть прошивок '
+                      'считает приложение фоновым и замораживает его через несколько '
+                      'секунд после сворачивания. Включите уведомления в настройках '
+                      'приложения.',
+                ?hint,
+              ].join('\n\n'),
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -43,13 +54,14 @@ class BackgroundCard extends ConsumerWidget {
                   onPressed: background.openAppSettings,
                   child: const Text('Настройки приложения'),
                 ),
-                FilledButton(
-                  onPressed: () async {
-                    await background.requestBatteryExemption();
-                    ref.invalidate(backgroundStatusProvider);
-                  },
-                  child: const Text('Разрешить работу в фоне'),
-                ),
+                if (!status.batteryExempt)
+                  FilledButton(
+                    onPressed: () async {
+                      await background.requestBatteryExemption();
+                      ref.invalidate(backgroundStatusProvider);
+                    },
+                    child: const Text('Разрешить работу в фоне'),
+                  ),
               ],
             ),
           ],

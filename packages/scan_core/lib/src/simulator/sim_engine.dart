@@ -43,7 +43,7 @@ final class SimEngine {
 
   /// Как у типичной машины: второго ряда и температуры масла нет.
   static const supportedPids = {
-    0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, //
+    0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, //
     0x10, 0x11, 0x14, 0x15, 0x1F, 0x2F, 0x33, 0x42, 0x46,
   };
 
@@ -168,6 +168,7 @@ final class SimEngine {
 
   /// Значение PID в момент [t] (секунды от пуска) в физических единицах.
   double? value(int pid, double t) => switch (pid) {
+    0x03 => fuelSystem(t).toDouble(),
     0x04 => load(t),
     0x05 => coolant(t),
     0x06 => stft(t),
@@ -189,6 +190,23 @@ final class SimEngine {
     _ => null,
   };
 
+  /// PID 03: замкнутый контур на прогретом зонде, открытый — на холодном
+  /// и при разгоне или сбросе газа.
+  int fuelSystem(double t) => _closedLoop(t)
+      ? fuelSystemClosed
+      : coolant(t) <= 40
+      ? fuelSystemOpenCold
+      : fuelSystemOpenLoad;
+
+  /// PID 01: «Check Engine» горит, если у сценария есть коды; все проверки есть,
+  /// адсорбер не завершён, пока двигатель не прогрет.
+  List<int> readiness(double t) => [
+    (scenario.dtcs.isEmpty ? 0 : 0x80) | scenario.dtcs.length,
+    0x07,
+    0x65,
+    coolant(t) < 60 ? 0x04 : 0x00,
+  ];
+
   /// Сырые байты ответа на 01PID — обратные формулы к [standardPids].
   List<int>? mode01(int pid, double t) {
     if (pid % 0x20 == 0) {
@@ -200,6 +218,7 @@ final class SimEngine {
       });
     }
     if (!supportedPids.contains(pid)) return null;
+    if (pid == 0x01) return readiness(t);
     final v = value(pid, t)!;
     int byte(num x) => x.round().clamp(0, 255);
     List<int> word(num x) {
@@ -217,6 +236,7 @@ final class SimEngine {
       0x06 || 0x07 || 0x08 || 0x09 => [byte((v + 100) * 128 / 100)],
       0x0E => [byte((v + 64) * 2)],
       0x14 || 0x15 => [byte(v * 200), 0x80],
+      0x03 => [byte(v), 0x00],
       _ => [byte(v)],
     };
   }

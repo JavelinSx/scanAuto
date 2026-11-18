@@ -143,6 +143,24 @@ void main() {
     expect(rec.segments.last.note, 'программа прервана');
   });
 
+  test('«Следующий этап»: следующий update сообщает о смене этапа', () {
+    // Гранта, 18.11: после досрочного конца прогрева город опрашивался набором
+    // прогрева — скорость обновлялась раз в 6 секунд.
+    final program = DiagnosticProgram.standard(Season.summer);
+    final rec = Recording(startedAt: DateTime.utc(2026));
+    final runner = ProgramRunner(program, rec);
+    rec.add('coolant', rec.startedAt, 60);
+    runner.update(0);
+    expect(runner.update(1000).runChanged, isFalse);
+    runner.skip(2000);
+    final next = runner.update(2250);
+    expect(next.stageIndex, 1);
+    expect(next.runIndex, 0);
+    expect(next.stageChanged, isTrue);
+    expect(next.runChanged, isTrue);
+    expect(runner.update(2500).runChanged, isFalse);
+  });
+
   test('LiveSampler.setFocus меняет быстрый набор', () {
     final sampler = LiveSampler(
       Elm327(SimulatedElm327()),

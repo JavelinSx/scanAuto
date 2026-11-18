@@ -12,6 +12,7 @@ export 'src/hex.dart';
 export 'src/obd/dtc.dart';
 export 'src/obd/mode06.dart';
 export 'src/obd/pids.dart';
+export 'src/obd/readiness.dart';
 export 'src/program/diagnostic_program.dart';
 export 'src/program/program_runner.dart';
 export 'src/program/simulate_program.dart';
