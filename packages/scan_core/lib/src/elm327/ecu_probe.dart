@@ -36,6 +36,11 @@ class EcuProbe {
   /// Их ответы стоит писать в запись сырыми — расшифровка по журналам.
   final List<String> dataBlockCommands = [];
 
+  /// Адаптер принял управление потоком с паузой 5 мс между кадрами
+  /// (`ATFCSH7E0`, `ATFCSD300005`, `ATFCSM1`): длинные ответы производителя
+  /// реже обрываются. Включается только на время этих запросов.
+  bool flowControl = false;
+
   /// Первый из [dataBlockCommands] — для совместимости.
   String? get dataBlockCommand =>
       dataBlockCommands.isEmpty ? null : dataBlockCommands.first;
@@ -97,6 +102,25 @@ class EcuProbe {
         block = await ask('$title после сеанса', command);
       }
       if (block.positive == true) dataBlockCommands.add(command);
+    }
+    if (isCan && dataBlockCommands.isNotEmpty) {
+      // Клон на Гранте обрывал каждый десятый длинный ответ (19.11): кадры
+      // приходят подряд без пауз, и адаптер их теряет. Просим блок делать
+      // паузу 5 мс между кадрами — если адаптер это умеет.
+      final answers = [
+        for (final c in const ['ATFCSH7E0', 'ATFCSD300005', 'ATFCSM1'])
+          (await _elm.send(c)).trim(),
+      ];
+      flowControl = answers.every((a) => a.toUpperCase().endsWith('OK'));
+      results.add(
+        ProbeResult(
+          'Управление потоком: пауза 5 мс между кадрами',
+          'ATFCSM1',
+          answers.join(' / '),
+          positive: flowControl,
+        ),
+      );
+      await _elm.send('ATFCSM0');
     }
     if (isCan) await _elm.send('ATSH7DF');
     return results;

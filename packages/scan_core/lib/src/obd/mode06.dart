@@ -27,12 +27,19 @@ final class MonitorTest {
   final int min;
   final int max;
 
-  /// Вне пределов — тест не пройден. У знаковых единиц (UASID 0x81…0xFE)
-  /// значения и пределы сравниваются со знаком.
-  bool get failed {
+  /// Значение вне пределов, заданных блоком. У знаковых единиц (UASID
+  /// 0x81…0xFE) сравнение со знаком. Это не обязательно неисправность: в начале
+  /// поездки тест часто ещё не выполнялся (см. [noResult]), а пределы ВАЗ для
+  /// лямбд в режиме 06 не документированы — неисправность подтверждает код.
+  bool get outOfRange {
     final v = _signed(value), lo = _signed(min), hi = _signed(max);
     return v < lo || v > hi;
   }
+
+  /// Значение 0 при ненулевых пределах: тест, скорее всего, ещё не выполнялся
+  /// в этой поездке (Гранта 19.11: «время между переключениями» 0 мс в начале
+  /// и 1920 мс в конце).
+  bool get noResult => value == 0 && (min != 0 || max != 0);
 
   bool get _isSigned => uasid >= 0x81 && uasid <= 0xFE;
   int _signed(int raw) => _isSigned && raw >= 0x8000 ? raw - 0x10000 : raw;
@@ -102,7 +109,8 @@ final class MonitorTest {
         'raw_max': max,
         'uasid': uasid,
       },
-      'failed': failed,
+      'out_of_range': outOfRange,
+      if (noResult) 'no_result': true,
     };
   }
 }
@@ -185,7 +193,11 @@ final class MonitorTestsReport {
       '${monitorTitle(t.mid)} / ${testTitle(t.mid, t.tid)} = '
           '${t.scaled == null ? 'сырое ${t.value} (UASID ${t.uasid.toRadixString(16)})' : '${_fmt(t.scaled!)} ${t.unit}'.trim()} '
           '(${t.scaled == null ? '${t.min}…${t.max}' : '${_fmt(t.scaledMin!)}…${_fmt(t.scaledMax!)}'})'
-          '${t.failed ? ' НЕ ПРОЙДЕН' : ''}',
+          '${t.noResult
+              ? ' нет результата'
+              : t.outOfRange
+              ? ' вне пределов'
+              : ''}',
   ];
 
   static String _fmt(double v) =>

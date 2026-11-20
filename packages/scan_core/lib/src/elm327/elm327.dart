@@ -63,6 +63,9 @@ final class ProtocolAttempt {
 
   /// Цифра для ATSP: '5' — ISO 14230 с быстрой инициализацией.
   final String protocol;
+
+  /// Протоколы 6–C — CAN.
+  bool get isCan => (int.tryParse(protocol, radix: 16) ?? 0) >= 6;
   final String title;
 
   /// Заголовок запроса без пробелов: '8110F1' — блоку двигателя по физическому адресу.
@@ -147,8 +150,9 @@ class Elm327 {
     this.log,
     this.canRetries = 3,
     this.canRetryDelay = const Duration(milliseconds: 1500),
-    this.canWaitTries = 45,
+    this.canWaitTries = 150,
     this.canWaitStep = const Duration(seconds: 2),
+    this.tuneTimeout = true,
   }) {
     _subscription = _transport.input.listen(
       _onData,
@@ -174,6 +178,9 @@ class Elm327 {
   /// полторы минуты).
   final int canWaitTries;
   final Duration canWaitStep;
+
+  /// Подбирать ли ATST при подключении (см. [_tuneTimeout]).
+  final bool tuneTimeout;
 
   /// Был ли за подключение `CAN ERROR`: тогда итоговая ошибка — про шину CAN,
   /// а не «машина не отвечает».
@@ -299,6 +306,16 @@ class Elm327 {
       } on ElmException catch (e) {
         if (!_noAnswer.contains(e.error)) rethrow;
         log?.call('PROTOCOL сохранённый не ответил: ${e.error.name}');
+        // CAN ERROR на сохранённом CAN: машина та же, просто адаптер ещё не видит
+        // шину (Гранта на холодную, 19.11). Автопоиск и K-Line только потратят
+        // время — сразу ждём шину.
+        if (e.error == ElmError.canError && saved.isCan) {
+          log?.call('PROTOCOL автопоиск и K-Line пропускаем: машина на CAN');
+          if (await _waitForCan(onProgress, saved) case final raw?) {
+            return await _finishInit(raw, version, voltage, saved);
+          }
+          throw ElmException(ElmError.canError, e.raw);
+        }
       } on ElmTimeoutException {
         log?.call('PROTOCOL сохранённый не ответил: тайм-аут');
       }
@@ -374,6 +391,14 @@ class Elm327 {
       'цифра числа ответов — ${fast.count ? 'да' : 'нет'}, '
       'несколько PID в запросе — ${fast.multi ? 'да' : 'нет'}',
     );
+    if (isCan && responders == 1 && tuneTimeout) {
+      await _tuneTimeout(
+        supported.contains(0x0C)
+            ? 0x0C
+            : supported.firstWhere((p) => p % 0x20 != 0, orElse: () => 0x00),
+        count: fast.count,
+      );
+    }
 
     return _info = ElmInfo(
       version: version,
@@ -384,6 +409,56 @@ class Elm327 {
       responders: responders,
       responseCount: fast.count,
       multiPid: fast.multi,
+    );
+  }
+
+  /// Подбор тайм-аута адаптера (ATST, по 4.1 мс). Гранта 19.11: с цифрой числа
+  /// ответов запрос всё равно 144 мс — клон, похоже, ждёт тайм-аут. Пробуем
+  /// короче; берём, только если быстрее на 10+ мс и без единой потери,
+  /// иначе возвращаем ATST 32 (≈200 мс, внутри него — адаптивный AT1).
+  Future<void> _tuneTimeout(int pid, {required bool count}) async {
+    if (pid == 0) return;
+    final command = '01${hexByte(pid)}${count ? '1' : ''}';
+    Future<(int, bool)> measure() async {
+      final times = <int>[];
+      var ok = true;
+      for (var i = 0; i < 6; i++) {
+        final watch = Stopwatch()..start();
+        try {
+          final messages = parseObdResponse(
+            await send(command),
+            command: command,
+          );
+          if (mode01Data(messages, pid) == null) ok = false;
+        } on ElmException {
+          ok = false;
+        } on ElmTimeoutException {
+          ok = false;
+        }
+        times.add(watch.elapsedMilliseconds);
+      }
+      times.sort();
+      return (times[times.length ~/ 2], ok);
+    }
+
+    final (base, baseOk) = await measure();
+    if (!baseOk) return;
+    var best = base;
+    int? bestSt;
+    for (final st in const [0x19, 0x10]) {
+      await send('ATST${hexByte(st)}');
+      final (ms, ok) = await measure();
+      if (!ok) break;
+      if (ms < best - 10) {
+        best = ms;
+        bestSt = st;
+      }
+    }
+    await send('ATST${hexByte(bestSt ?? 0x32)}');
+    log?.call(
+      'PROTOCOL тайм-аут адаптера: '
+      '${bestSt == null ? 'оставлен ATST32, короче не быстрее' : 'ATST${hexByte(bestSt)}'}; '
+      'запрос $best мс (было $base мс)',
     );
   }
 
@@ -500,8 +575,9 @@ class Elm327 {
       }
     }
     if (_sawCanError) {
-      if (await _waitForCan(onProgress) case final raw?) {
-        return (raw, protocolFallbacks.firstWhere((a) => a.protocol == '6'));
+      final can = protocolFallbacks.firstWhere((a) => a.protocol == '6');
+      if (await _waitForCan(onProgress, can) case final raw?) {
+        return (raw, can);
       }
       throw ElmException(ElmError.canError, last.raw);
     }
@@ -512,22 +588,26 @@ class Elm327 {
   /// она оживает через секунды или минуты после пуска — Car Scanner ждёт около
   /// минуты. Ждём до [canWaitTries] попыток с паузой [canWaitStep]; раз в 5 попыток
   /// полный сброс адаптера, на случай если его CAN-часть «зависла».
-  Future<String?> _waitForCan(void Function(String status)? onProgress) async {
+  Future<String?> _waitForCan(
+    void Function(String status)? onProgress,
+    ProtocolAttempt protocol,
+  ) async {
     final total = canWaitStep * canWaitTries;
     log?.call(
       'PROTOCOL жду шину CAN: до $canWaitTries попыток, '
       'каждые ${canWaitStep.inMilliseconds} мс',
     );
     for (var i = 1; i <= canWaitTries; i++) {
-      final left = total - canWaitStep * (i - 1);
+      final passed = canWaitStep * (i - 1);
       onProgress?.call(
-        'Жду шину CAN машины… осталось ${left.inSeconds} с. '
-        'На холодную она может ответить не сразу',
+        'Жду шину CAN машины… прошло ${passed.inSeconds} с из ${total.inSeconds}. '
+        '${passed.inSeconds < 30 ? 'На холодную адаптер может видеть её не сразу.' : 'Если долго — выньте адаптер из разъёма на 5 секунд и вставьте снова: приложение подключится само.'}',
       );
       await Future<void>.delayed(canWaitStep);
       if (i % 5 == 1) {
         await _reset();
-        await send('ATSP6');
+        await send('ATSP${protocol.protocol}');
+        if (protocol.header case final header?) await send('ATSH$header');
       } else {
         await send('ATPC');
       }

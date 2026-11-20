@@ -166,8 +166,23 @@ class _Running extends ConsumerWidget {
             children: [
               Expanded(
                 child: FilledButton.tonal(
-                  onPressed: () =>
-                      ref.read(scanControllerProvider.notifier).skipStage(),
+                  onPressed: () {
+                    final skipped = ref
+                        .read(scanControllerProvider.notifier)
+                        .skipStage();
+                    if (!skipped) {
+                      ScaffoldMessenger.of(context)
+                        ..hideCurrentSnackBar()
+                        ..showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Этап «${stage.title}» только что начался сам. '
+                              'Чтобы пропустить и его, нажмите ещё раз.',
+                            ),
+                          ),
+                        );
+                    }
+                  },
                   child: Text(last ? 'Закончить' : 'Следующий этап'),
                 ),
               ),

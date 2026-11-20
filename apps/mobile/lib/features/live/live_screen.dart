@@ -152,6 +152,8 @@ class _Live extends StatelessWidget {
     final pid = pidsByKey[selected] ?? pids.first;
     final value = scan.latest[pid.key];
     final text = Theme.of(context).textTheme;
+    // Напряжение по самому блоку (ВАЗ, 22 00 01): точнее, чем у адаптера.
+    final ecuVoltage = scan.latest['ecu_voltage'];
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -159,6 +161,7 @@ class _Live extends StatelessWidget {
         Text(
           '${info.protocolName} · ${info.version}'
           '${scan.vin != null ? '\nVIN ${scan.vin}' : ''}'
+          '${ecuVoltage == null ? '' : '\nБортсеть по блоку ${ecuVoltage.toStringAsFixed(1)} В${info.voltage == null ? '' : ' (адаптер показывает ${info.voltage} В)'}'}'
           '\nЗапись: ${_duration(recording.duration)}'
           '${recording.coveredFrom > Duration.zero ? ', в памяти последние ${ScanController.liveWindow.inHours} ч' : ''}',
           style: text.bodySmall,

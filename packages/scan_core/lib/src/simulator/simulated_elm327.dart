@@ -26,6 +26,7 @@ final class SimulatedElm327 implements ObdTransport {
     this.responseCount = true,
     this.multiPid = true,
     this.dataService = 0x21,
+    this.truncateIsoTp = false,
   }) : _canErrorsLeft = canErrors,
        _clock = clock ?? _stopwatchClock(),
        _engine = SimEngine(scenario, seed: seed, ambient: ambient),
@@ -65,6 +66,11 @@ final class SimulatedElm327 implements ObdTransport {
   /// Каким запросом блок отдаёт данные производителя по адресу 7E0:
   /// 0x21 — KWP `21 01` (Январь), 0x22 — UDS `22 00 01` (Итэлма M74 CAN).
   final int dataService;
+
+  /// Как клон на Гранте: многокадровый ответ теряет последний кадр, если блок
+  /// шлёт кадры без пауз (управление потоком не включено, ATFCSM0).
+  final bool truncateIsoTp;
+  int _flowControlMode = 0;
 
   String _protocol = '0';
   String? _header;
@@ -180,6 +186,13 @@ final class SimulatedElm327 implements ObdTransport {
         return '${(_engine.value(0x42, _seconds)! - 0.2).toStringAsFixed(1)}V';
     }
     if (c == 'PC') return 'OK';
+    if (RegExp(r'^FC(SH[0-9A-F]{3}|SD[0-9A-F]{2,10})$').hasMatch(c)) {
+      return 'OK';
+    }
+    if (RegExp(r'^FCSM([0-2])$').firstMatch(c) case final m?) {
+      _flowControlMode = int.parse(m.group(1)!);
+      return 'OK';
+    }
     if (c == 'FE') {
       _err94 = false;
       return 'OK';
@@ -251,30 +264,26 @@ final class SimulatedElm327 implements ObdTransport {
         return _message([0x44]);
       // Заглушка блока данных производителя для тестов разведки и сырой записи:
       // раскладка выдуманная (ОЖ+40, обороты/40), настоящая у ВАЗ — по журналам.
-      // UDS 22 00 01, как у Итэлмы M74 CAN: многокадровый ответ. Раскладка
-      // выдуманная (напряжение ×10, ОЖ (t+48)/0.75 словом, обороты ×4 словом).
+      // UDS 22 00 01, как у Итэлмы M74 CAN: 63 байта, раскладка как у Гранты
+      // (VazBlock0001): напряжение ×10, ОЖ (t+48)/0.75, обороты ×4 словом,
+      // долгосрочная коррекция и температура воздуха; остальное — нули.
       case 0x22
           when bytes.length == 3 &&
               bytes[1] == 0x00 &&
               bytes[2] == 0x01 &&
               _header == '7E0' &&
               dataService == 0x22:
-        final coolant = ((_engine.value(0x05, _seconds)! + 48) / 0.75).round();
+        int byte(num x) => x.round().clamp(0, 255);
         final rpm = (_engine.value(0x0C, _seconds)! * 4).round();
-        return _message([
-          0x62,
-          0x00,
-          0x01,
-          (_engine.value(0x42, _seconds)! * 10).round().clamp(0, 255),
-          coolant >> 8,
-          coolant & 0xFF,
-          rpm >> 8,
-          rpm & 0xFF,
-          0x00,
-          ((_engine.value(0x0E, _seconds)! + 64) * 2).round().clamp(0, 255),
-          0x00,
-          0x00,
-        ]);
+        final block = List<int>.filled(63, 0)
+          ..setAll(0, [0x62, 0x00, 0x01])
+          ..[4] = byte(_engine.value(0x42, _seconds)! * 10)
+          ..[6] = byte((_engine.value(0x05, _seconds)! + 48) / 0.75)
+          ..[7] = rpm >> 8
+          ..[8] = rpm & 0xFF
+          ..[30] = byte((_engine.value(0x07, _seconds)! + 100) * 128 / 100)
+          ..[36] = byte((_engine.value(0x0F, _seconds)! + 48) / 0.75);
+        return _message(block);
       case 0x22
           when bytes.length == 3 && bytes[1] == 0x00 && dataService == 0x22:
         return _message([0x7F, 0x22, 0x31]);
@@ -387,7 +396,7 @@ final class SimulatedElm327 implements ObdTransport {
   String _message(List<int> bytes) {
     String hex(List<int> b) => formatHex(b, spaces: _spaces);
     if (bytes.length <= 7) return hex(bytes);
-    final lines = [
+    final lines = <String>[
       bytes.length.toRadixString(16).padLeft(3, '0').toUpperCase(),
     ];
     lines.add('0: ${hex(bytes.sublist(0, 6))}');
@@ -397,6 +406,9 @@ final class SimulatedElm327 implements ObdTransport {
       lines.add(
         '${(index++ % 16).toRadixString(16).toUpperCase()}: ${hex(bytes.sublist(i, end))}',
       );
+    }
+    if (truncateIsoTp && _flowControlMode != 1 && lines.length > 3) {
+      lines.removeLast();
     }
     return lines.join('\r');
   }

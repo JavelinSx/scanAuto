@@ -274,8 +274,8 @@ void main() {
     final info = await elm.initialize(onProgress: progress.add);
     expect(info.protocol, 6);
     expect(info.protocolKey, '6');
-    expect(lines, contains('PROTOCOL CAN ожил на попытке 9 из 45'));
-    expect(progress, contains(startsWith('Жду шину CAN машины… осталось')));
+    expect(lines, contains('PROTOCOL CAN ожил на попытке 9 из 150'));
+    expect(progress, contains(startsWith('Жду шину CAN машины… прошло')));
     // Раз в 5 попыток — полный сброс адаптера.
     expect(lines.where((l) => l == 'TX ATZ').length, greaterThan(6));
     await elm.close();

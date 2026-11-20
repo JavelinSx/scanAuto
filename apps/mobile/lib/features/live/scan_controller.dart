@@ -142,6 +142,15 @@ class ScanController extends Notifier<ScanState> {
   /// Столько раз подряд переподключаемся сами, прежде чем показать экран обрыва.
   static const maxAutoReconnects = 3;
 
+  /// Ещё до первой записи: адаптер выдернули и вставили (так советует экран,
+  /// пока шина CAN молчит) — ждём, пока он снова появится, столько попыток.
+  static const maxConnectRetries = 6;
+
+  /// «Следующий этап» в первые столько миллисекунд после того, как этап сменился
+  /// сам, — скорее всего, нажат для прошлого этапа (Гранта 19.11: прогрев
+  /// закончился сам, через 5 с нажатие пропустило весь город). Нужно нажать ещё раз.
+  static const skipGuardMs = 10000;
+
   /// Пауза перед автоматическим переподключением: адаптеру нужно закрыть сокет.
   @visibleForTesting
   static Duration autoReconnectDelay = const Duration(seconds: 2);
@@ -170,6 +179,23 @@ class ScanController extends Notifier<ScanState> {
 
   /// Идёт [_finish]: конец сеанса читается один раз.
   bool _finishing = false;
+
+  /// В этом сеансе Bluetooth/Wi-Fi до адаптера уже открывался: значит, адаптер
+  /// есть, и обрыв до первой записи — скорее выдернули, чем не подключали.
+  bool _adapterReached = false;
+
+  /// Время записи, когда этап последний раз сменился сам (не кнопкой).
+  int? _autoStageChangeAtMs;
+  bool _skipPending = false;
+  bool _skipArmed = false;
+
+  /// Опрос и команды вокруг запросов производителя (управление потоком).
+  LiveSampler? _sampler;
+  int _rawCompleteBefore = 0;
+  int _rawIncompleteBefore = 0;
+  List<String> _rawSetup = const [];
+  List<String> _rawTeardown = const [];
+  bool _ecuVoltageLogged = false;
 
   /// Запросы данных производителя (`21 01`, `22 00 01`), на которые блок ответил
   /// при разведке: их ответы пишутся в запись сырыми, расшифровка — по журналам.
@@ -235,6 +261,15 @@ class ScanController extends Notifier<ScanState> {
     _runner = null;
     _runIndex = 0;
     _autoReconnects = 0;
+    _adapterReached = false;
+    _autoStageChangeAtMs = null;
+    _skipPending = false;
+    _skipArmed = false;
+    _rawSetup = const [];
+    _rawTeardown = const [];
+    _rawCompleteBefore = 0;
+    _rawIncompleteBefore = 0;
+    _ecuVoltageLogged = false;
     _dataBlocks = const [];
     _loggedSegments = 0;
     _lastSnapshotMs = 0;
@@ -332,6 +367,7 @@ class ScanController extends Notifier<ScanState> {
       if (transport is BluetoothTransport) {
         _log.write('bt', 'сокет открыт способом ${transport.method}');
       }
+      _adapterReached = true;
       if (!_isCurrent(generation)) {
         await transport.close();
         return;
@@ -441,8 +477,17 @@ class ScanController extends Notifier<ScanState> {
         now: now,
         rawCommands: _dataBlocks,
         rawHeader: '7E0',
-        onRaw: recording.addRaw,
+        // Сырые ответы — для расшифровки, а не для графиков: реже, чтобы не
+        // отнимать время у обычного опроса (три длинных ответа — около секунды).
+        rawEveryRounds: 8,
+        rawSetup: _rawSetup,
+        rawTeardown: _rawTeardown,
+        onRaw: (command, at, hex) {
+          recording.addRaw(command, at, hex);
+          if (command == VazBlock0001.command) _onVazBlock(recording, at, hex);
+        },
       );
+      _sampler = sampler;
       _sim?.drive = simDriveFor(runner?.stage.kind ?? StageKind.city);
       _lastSampleWall = null;
       unawaited(
@@ -485,6 +530,11 @@ class ScanController extends Notifier<ScanState> {
           _sim?.drive = simDriveFor(stage.kind);
           if (status.stageChanged) {
             unawaited(_background.start('Программа: ${stage.title}'));
+            if (!_skipPending && status.stageIndex > 0) {
+              _autoStageChangeAtMs = _nowMs();
+              _skipArmed = false;
+            }
+            _skipPending = false;
           }
           _log.write(
             'program',
@@ -572,10 +622,27 @@ class ScanController extends Notifier<ScanState> {
   }
 
   /// Водитель закончил текущий этап раньше.
-  void skipStage() {
+  /// false — нажатие пришлось сразу после того, как этап сменился сам: этап
+  /// не пропущен, экран просит нажать ещё раз.
+  bool skipStage() {
+    final since = _autoStageChangeAtMs == null
+        ? null
+        : _nowMs() - _autoStageChangeAtMs!;
+    if (since != null && since < skipGuardMs * _speed && !_skipArmed) {
+      _skipArmed = true;
+      _log.write(
+        'program',
+        '«Следующий этап» через ${since ~/ 1000} с после того, как этап сменился '
+            'сам, — не пропускаю, жду повторного нажатия',
+      );
+      return false;
+    }
+    _skipArmed = false;
+    _skipPending = true;
     _log.write('program', 'этап закончен водителем');
     _runner?.skip(_nowMs());
     _logStages();
+    return true;
   }
 
   /// Остановить программу или запись: адаптер отключается, запись остаётся.
@@ -618,6 +685,16 @@ class ScanController extends Notifier<ScanState> {
     // Пропуски за поездку — пока адаптер ещё подключён.
     final elm = _elm;
     final rec = _recording;
+    final complete = _rawCompleteBefore + (_sampler?.rawComplete ?? 0);
+    final incomplete = _rawIncompleteBefore + (_sampler?.rawIncomplete ?? 0);
+    if (complete + incomplete > 0) {
+      _log.write(
+        'vaz',
+        'ответов производителя: полных $complete, оборванных $incomplete '
+            '(в запись не пошли)'
+            '${_rawSetup.isEmpty ? '' : ', с паузой между кадрами'}',
+      );
+    }
     if (elm != null && rec != null) {
       await _readMisfires(elm, rec, 'конец');
       await _readChecks(elm, rec, 'конец');
@@ -637,16 +714,16 @@ class ScanController extends Notifier<ScanState> {
     if (!_isCurrent(generation)) return;
     if (_canAutoReconnect(error)) {
       _autoReconnects++;
-      _log.write(
-        'session',
-        'автопереподключение $_autoReconnects из $maxAutoReconnects',
-      );
+      final max = canResume ? maxAutoReconnects : maxConnectRetries;
+      _log.write('session', 'автопереподключение $_autoReconnects из $max');
       state = ScanState(
         phase: ScanPhase.connecting,
         target: _target,
-        status:
-            'Связь с адаптером пропала — переподключаюсь, '
-            'попытка $_autoReconnects из $maxAutoReconnects…',
+        status: canResume
+            ? 'Связь с адаптером пропала — переподключаюсь, '
+                  'попытка $_autoReconnects из $max…'
+            : 'Адаптер отключился — жду, когда он снова появится '
+                  '(попытка $_autoReconnects из $max)…',
         recording: state.recording,
         program: state.program,
         programStatus: state.programStatus,
@@ -679,17 +756,50 @@ class ScanController extends Notifier<ScanState> {
   /// Связь пропала посреди записи (адаптер замолчал, Bluetooth оборвался,
   /// приложение замораживали в фоне) — пробуем вернуться сами. Если машина
   /// не отвечает или нет разрешений, переподключение не поможет.
-  bool _canAutoReconnect(Object error) =>
-      _target is! SimulatorTarget &&
-      canResume &&
-      _autoReconnects < maxAutoReconnects &&
-      switch (error) {
-        ElmTimeoutException() || ElmDisconnectedException() => true,
-        BluetoothException(:final code) =>
-          code != 'permission_denied' && code != 'bluetooth_off',
-        SocketException() => true,
-        _ => false,
-      };
+  ///
+  /// До первой записи — только если адаптер в этом сеансе уже отвечал: его
+  /// выдернули и вставили, пока шина CAN молчала (так советует экран ожидания).
+  bool _canAutoReconnect(Object error) {
+    if (_target is SimulatorTarget) return false;
+    final retriable = switch (error) {
+      ElmTimeoutException() || ElmDisconnectedException() => true,
+      BluetoothException(:final code) =>
+        code != 'permission_denied' && code != 'bluetooth_off',
+      SocketException() => true,
+      _ => false,
+    };
+    if (!retriable) return false;
+    if (canResume) return _autoReconnects < maxAutoReconnects;
+    return _recording == null &&
+        _adapterReached &&
+        _autoReconnects < maxConnectRetries;
+  }
+
+  /// Ответ 22 00 01 (Итэлма M74 CAN): напряжение бортсети по самому блоку —
+  /// в запись и на экран. В первый раз — в журнал рядом с напряжением адаптера.
+  void _onVazBlock(Recording recording, DateTime at, String hex) {
+    final bytes = parseHexBytes(hex);
+    final values = bytes == null ? null : VazBlock0001.decode(bytes);
+    if (values == null) return;
+    for (final e in vazSeries) {
+      if (values[e.key] case final v?) {
+        recording.add(e.key, at, v);
+        _latest[e.key] = v;
+        _dirty = true;
+      }
+    }
+    if (!_ecuVoltageLogged) {
+      _ecuVoltageLogged = true;
+      _log.write(
+        'vaz',
+        '22 00 01: бортсеть по блоку ${values['ecu_voltage']} В '
+            '(адаптер ATRV — ${state.info?.voltage ?? '?'} В), '
+            'ОЖ ${values['coolant']} °C, обороты ${values['rpm']}, '
+            'долгосрочная коррекция ${values['ltft1']?.toStringAsFixed(1)} %, '
+            'воздух ${values['iat']} °C',
+      );
+    }
+  }
 
   String _segmentsSummary() => [
     for (final s in _recording?.segments ?? const <RecordingSegment>[])
@@ -727,6 +837,10 @@ class ScanController extends Notifier<ScanState> {
         );
       }
       _dataBlocks = List.unmodifiable(probe.dataBlockCommands);
+      if (probe.flowControl) {
+        _rawSetup = const ['ATFCSM1'];
+        _rawTeardown = const ['ATFCSM0'];
+      }
       _log.write(
         'vaz',
         _dataBlocks.isEmpty
@@ -851,6 +965,12 @@ class ScanController extends Notifier<ScanState> {
   Future<void> _teardown() async {
     _publish?.cancel();
     _publish = null;
+    // Опрос после переподключения — новый: счёт ответов производителя копим.
+    if (_sampler case final s?) {
+      _rawCompleteBefore += s.rawComplete;
+      _rawIncompleteBefore += s.rawIncomplete;
+      _sampler = null;
+    }
     final samples = _samples;
     final elm = _elm;
     _samples = null;
@@ -880,11 +1000,12 @@ String describeScanError(Object e) => switch (e) {
         'проверьте, что адаптер вставлен в разъём до упора. Если не поможет — '
         'пришлите журнал сеанса.',
   ElmException(error: ElmError.canError) =>
-    'Шина CAN машины не ответила за полторы минуты: питание у адаптера есть, '
-        'а данных нет. Выньте адаптер из разъёма на пару секунд и вставьте снова — '
-        'это полностью его перезапускает: если он поймал сбой при пуске двигателя, '
-        'это помогает. Лучше вставлять адаптер, когда двигатель уже заведён. '
-        'Если Car Scanner в это время подключается — пришлите журнал сеанса.',
+    'Шина CAN машины не ответила за 5 минут: питание у адаптера есть, а данных '
+        'нет — адаптер не видит шину. Выньте его из разъёма на 5 секунд и вставьте '
+        'снова — это полностью его перезапускает. На холодной машине дешёвый клон '
+        'бывает «слепым», пока не прогреется: на Гранте он подключался сразу, когда '
+        'в салоне уже было тепло. Если Car Scanner в это время подключается — '
+        'пришлите журнал сеанса.',
   ElmException(:final error) => 'Адаптер ответил ошибкой: ${error.name}.',
   ElmTimeoutException() =>
     'Адаптер перестал отвечать. Переподключите его к разъёму.',

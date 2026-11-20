@@ -330,14 +330,41 @@ void main() {
     final state = await done.future.timeout(const Duration(seconds: 40));
     sub.close();
     expect(state.phase, ScanPhase.live, reason: state.error);
-    expect(log.lines, contains('[elm] PROTOCOL CAN ожил на попытке 3 из 45'));
+    expect(log.lines, contains('[elm] PROTOCOL CAN ожил на попытке 3 из 150'));
     await controller.disconnect();
   }, timeout: const Timeout(Duration(seconds: 60)));
+
+  test(
+    'адаптер вынули и вставили, пока ждали шину, — подключается сам',
+    () async {
+      // Совет на экране ожидания: выньте адаптер на 5 секунд и вставьте снова.
+      bluetooth.canErrors = 1000;
+      final controller = container.read(scanControllerProvider.notifier);
+      unawaited(controller.connect(adapter));
+      await _waitFor(
+        container,
+        (s) => (s.status ?? '').startsWith('Жду шину CAN'),
+        timeout: const Duration(seconds: 30),
+      );
+      bluetooth.canErrors = 0;
+      bluetooth.last!.drop();
+      final live = await _waitFor(
+        container,
+        (s) => s.phase == ScanPhase.live,
+        timeout: const Duration(seconds: 30),
+      );
+      expect(live.recording, isNotNull);
+      expect(bluetooth.connects, hasLength(2));
+      expect(log.lines, contains('[session] автопереподключение 1 из 6'));
+      await controller.disconnect();
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
 
   test('сообщение про шину CAN', () {
     expect(
       describeScanError(ElmException(ElmError.canError, 'CAN ERROR')),
-      allOf(contains('Шина CAN'), contains('Выньте адаптер')),
+      allOf(contains('Шина CAN'), contains('Выньте его из разъёма')),
     );
   });
 }

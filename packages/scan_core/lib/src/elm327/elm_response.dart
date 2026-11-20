@@ -126,6 +126,29 @@ List<List<int>> parseObdResponse(String raw, {String? command}) {
   return messages;
 }
 
+/// Сколько байт многокадрового ответа CAN (ISO-TP) не дошло: строка с длиной
+/// есть, а кадров меньше. Клон на Гранте (19.11) обрывал так каждый десятый
+/// длинный ответ. 0 — ответ полный или однокадровый.
+int isoTpMissingBytes(String raw) {
+  final lines = raw
+      .split(_lineBreak)
+      .map((l) => l.trim())
+      .where((l) => l.isNotEmpty)
+      .toList();
+  for (var i = 0; i < lines.length; i++) {
+    if (!_isoTpCount.hasMatch(lines[i])) continue;
+    final total = int.parse(lines[i], radix: 16);
+    var got = 0;
+    for (var j = i + 1; j < lines.length; j++) {
+      final frame = _isoTpFrame.firstMatch(lines[j]);
+      if (frame == null) break;
+      got += (parseHexBytes(frame.group(2)!) ?? const []).length;
+    }
+    return got >= total ? 0 : total - got;
+  }
+  return 0;
+}
+
 /// Данные режима 01 для [pid]: байты после «41 PID». Берём первый ответивший блок —
 /// без заголовков не отличить двигатель от коробки, а PID двигателя отдаёт двигатель.
 List<int>? mode01Data(List<List<int>> messages, int pid) {

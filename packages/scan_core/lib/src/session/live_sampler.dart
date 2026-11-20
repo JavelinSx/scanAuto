@@ -26,6 +26,8 @@ class LiveSampler {
     this.onRaw,
     this.rawEveryRounds = 4,
     this.rawHeader,
+    this.rawSetup = const [],
+    this.rawTeardown = const [],
   }) : _now = now ?? DateTime.now {
     setFocus(focus);
   }
@@ -58,6 +60,16 @@ class LiveSampler {
   /// Заголовок для запросов производителя (на CAN — '7E0', двигатель); после них
   /// возвращается функциональный 7DF, чтобы обычный опрос шёл как раньше.
   final String? rawHeader;
+
+  /// AT-команды до и после запросов производителя — например, управление
+  /// потоком с паузой между кадрами (`ATFCSM1` / `ATFCSM0`).
+  final List<String> rawSetup;
+  final List<String> rawTeardown;
+
+  /// Ответы производителя: полные и оборванные (не все кадры ISO-TP дошли —
+  /// такие в запись не идут).
+  int rawComplete = 0;
+  int rawIncomplete = 0;
   List<Pid> fast = const [];
   List<Pid> slow = const [];
   final DateTime Function() _now;
@@ -95,11 +107,20 @@ class LiveSampler {
             headerChanged = true;
             await _elm.send('ATSH$h');
           }
+          for (final c in rawSetup) {
+            await _elm.send(c);
+          }
           for (final command in rawCommands) {
             try {
               final raw = await _elm.send(command);
+              if (isoTpMissingBytes(raw) > 0) {
+                rawIncomplete++;
+                timeoutsInRow = 0;
+                continue;
+              }
               final messages = parseObdResponse(raw, command: command);
               if (messages.isNotEmpty) {
+                rawComplete++;
                 onRaw!(
                   command,
                   _now(),
@@ -117,6 +138,9 @@ class LiveSampler {
       }
       if (headerChanged) {
         try {
+          for (final c in rawTeardown) {
+            await _elm.send(c);
+          }
           await _elm.send('ATSH7DF');
           headerChanged = false;
         } on ElmTimeoutException {

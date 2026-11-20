@@ -15,7 +15,7 @@ void main() {
     expect(tests[0].tid, misfireEwmaTid);
     expect(tests[0].value, 3);
     expect(tests[1].value, 7);
-    expect(tests[1].failed, isTrue);
+    expect(tests[1].outOfRange, isTrue);
     expect(MisfireReport.countsFrom(tests), (current: 7, ewma: 3));
   });
 

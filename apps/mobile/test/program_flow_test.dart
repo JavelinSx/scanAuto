@@ -165,6 +165,43 @@ void main() {
     expect(log.lines, contains(startsWith('[misfire] конец: ц1 0/0')));
   }, timeout: const Timeout(Duration(seconds: 90)));
 
+  test('«Следующий этап» сразу после смены этапа: нужно нажать ещё раз', () async {
+    // Гранта 19.11: прогрев закончился сам, через 5 с нажатие пропустило город.
+    final log = _MemoryLog();
+    final container = ProviderContainer(
+      overrides: [
+        wifiBindingProvider.overrideWithValue(_NoWifi()),
+        sessionLogFactoryProvider.overrideWithValue(() async => log),
+      ],
+    );
+    addTearDown(container.dispose);
+    final city = Completer<void>();
+    final highway = Completer<void>();
+    container.listen(scanControllerProvider, (_, next) {
+      final stage = next.programStatus?.stageIndex;
+      if (stage == 1 && !city.isCompleted) city.complete();
+      if (stage == 2 && !highway.isCompleted) highway.complete();
+    });
+    final controller = container.read(scanControllerProvider.notifier);
+    unawaited(
+      controller.connect(
+        const SimulatorTarget(SimScenario.healthy, speed: 50),
+        program: DiagnosticProgram.standard(Season.summer),
+        vehicle: _granta,
+      ),
+    );
+    await city.future.timeout(const Duration(seconds: 60));
+
+    expect(controller.skipStage(), isFalse, reason: 'город только начался');
+    expect(log.lines, contains(startsWith('[program] «Следующий этап» через')));
+    expect(controller.skipStage(), isTrue, reason: 'второе нажатие');
+    await highway.future.timeout(const Duration(seconds: 10));
+    final rec = container.read(scanControllerProvider).recording!;
+    expect(rec.segments.map((s) => s.key), ['warmup', 'city']);
+    expect(rec.segments.last.note, contains('закончен водителем'));
+    await controller.stop();
+  }, timeout: const Timeout(Duration(seconds: 90)));
+
   testWidgets('разбор ИИ: ключ сохраняется, в модель уходят этапы и профиль', (
     tester,
   ) async {

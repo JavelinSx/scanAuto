@@ -2,6 +2,7 @@ import 'dart:math';
 
 import '../obd/dtc.dart';
 import '../obd/pids.dart';
+import '../obd/vaz_data.dart';
 import '../session/recording.dart';
 import 'lttb.dart';
 
@@ -20,10 +21,22 @@ abstract final class AnalysisPacket {
     final points = maxPoints ?? (rec.segments.isEmpty ? 60 : 90);
     final idle = _idleClassifier(rec);
     final seriesOut = <Map<String, Object?>>[];
-    for (final pid in standardPids) {
+    final described = [
+      for (final pid in standardPids)
+        if (!_codeKeys.contains(pid.key))
+          (
+            key: pid.key,
+            name: pid.name,
+            unit: pid.unit,
+            digits: pid.decimals + 1,
+          ),
+      for (final e in vazSeries)
+        (key: e.key, name: e.name, unit: e.unit, digits: e.decimals + 1),
+    ];
+    for (final pid in described) {
       final s = rec.series[pid.key];
-      if (s == null || s.isEmpty || _codeKeys.contains(pid.key)) continue;
-      final digits = pid.decimals + 1;
+      if (s == null || s.isEmpty) continue;
+      final digits = pid.digits;
       final stats = <String, Object?>{'all': _stats(s.values, digits)};
       if (idle != null) {
         final idleValues = <double>[];
@@ -70,7 +83,9 @@ abstract final class AnalysisPacket {
           'note':
               'PID 01: готовность самопроверок блока. Незавершённая проверка '
               '(incomplete) — блок её ещё не прогнал после сброса ошибок или '
-              'снятия клеммы; это не оценка исправности. t — секунда записи.',
+              'снятия клеммы; это не оценка исправности. Блоки ВАЗ, похоже, '
+              'считают её заново каждую поездку: в конце поездки незавершённых '
+              'бывает больше, чем в начале. t — секунда записи.',
           'reads': [
             for (final r in rec.readiness)
               {
@@ -92,9 +107,11 @@ abstract final class AnalysisPacket {
         'monitor_tests': {
           'note':
               'Режим 06: результаты бортовых тестов блока на момент t (секунда '
-              'записи). failed — значение вне пределов, заданных блоком. Названия '
-              'тестов лямбда-зондов — по J1979, у производителя смысл может '
-              'отличаться; raw — масштаб единиц неизвестен.',
+              'записи). out_of_range — значение вне пределов, заданных блоком; '
+              'no_result — значение 0, тест в этой поездке, скорее всего, ещё не '
+              'выполнялся. Вне пределов — ещё не неисправность: её подтверждает '
+              'код. Названия тестов лямбда-зондов — по J1979, у производителя '
+              'смысл может отличаться; raw — масштаб единиц неизвестен.',
           't': rec.monitorTests.last.tMs ~/ 1000,
           'tests': [for (final t in rec.monitorTests.last.tests) t.describe()],
         },

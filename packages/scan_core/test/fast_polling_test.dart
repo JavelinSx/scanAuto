@@ -138,7 +138,7 @@ void main() {
       );
       expect(switchTime.scaled, 70);
       expect(switchTime.unit, 'мс');
-      expect(switchTime.failed, isFalse);
+      expect(switchTime.outOfRange, isFalse);
       expect(
         report.lines,
         contains(
@@ -163,7 +163,7 @@ void main() {
         min: 0x10000 - 4098,
         max: 4098,
       );
-      expect(t.failed, isFalse);
+      expect(t.outOfRange, isFalse);
       expect(t.scaled, closeTo(-0.1, 0.001));
     });
   });
@@ -205,7 +205,7 @@ void main() {
       );
       await sampler.run().take(40).drain<void>();
       expect(rec.raw['220001']!.hex.first, startsWith('620001'));
-      expect(rec.raw['220001']!.hex.first.length, 24, reason: '12 байт');
+      expect(rec.raw['220001']!.hex.first.length, 126, reason: '63 байта');
       await elm.close();
     },
   );
@@ -280,7 +280,7 @@ void main() {
       expect(test['test'], 'время переключения богато→бедно');
       expect(test['value'], 150);
       expect(test['unit'], 'мс');
-      expect(test['failed'], isTrue);
+      expect(test['out_of_range'], isTrue);
     });
 
     test('состояние топливной системы — словами', () {
